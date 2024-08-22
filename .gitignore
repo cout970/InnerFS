@@ -1,0 +1,9 @@
+/.idea
+/target
+/data
+/blob
+/run
+index.db
+index.db-wal
+index.db-shm
+index.db-*
