@@ -35,7 +35,7 @@ impl ObjectStorage for SqlarObjectStorage {
         Ok(file.unwrap().data)
     }
 
-    fn set(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
+    fn put(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
         println!("Create: {}", info);
         let name = info.full_path.clone();
         let file = SqlarFile {

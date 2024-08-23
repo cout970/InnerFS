@@ -1,12 +1,16 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-
+use std::rc::Rc;
+use anyhow::anyhow;
+use crate::config::Config;
+use crate::current_timestamp;
 use crate::obj_storage::{ObjectStorage, ObjInfo};
 use crate::sql::FileRow;
 use crate::storage::Storage;
 
 pub struct StorageInterface {
     pub obj_storage: Box<dyn ObjectStorage>,
+    pub config: Rc<Config>,
     pub cache: HashMap<i64, StorageInterfaceCache>,
     pub pending_remove: HashSet<ObjInfo>,
 }
@@ -20,11 +24,20 @@ pub struct StorageInterfaceCache {
 }
 
 impl StorageInterface {
-    pub fn new(obj_storage: Box<dyn ObjectStorage>) -> Self {
+    pub fn new(config: Rc<Config>, obj_storage: Box<dyn ObjectStorage>) -> Self {
         Self {
             obj_storage,
+            config,
             cache: HashMap::new(),
             pending_remove: HashSet::new(),
+        }
+    }
+
+    pub fn path(config: &Config, file: &FileRow, full_path: &str) -> String {
+        if config.use_hash_as_filename {
+            format!("{}.dat", &file.sha512[..32])
+        } else {
+            full_path.trim_start_matches('/').to_string()
         }
     }
 }
@@ -47,7 +60,9 @@ impl Storage for StorageInterface {
     }
 
     fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, anyhow::Error> {
-        let row = self.cache.get_mut(&file.id).unwrap();
+        let row = self.cache.get_mut(&file.id).ok_or_else(||
+            anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
+        )?;
 
         if row.mode & libc::O_WRONLY != 0 {
             return Err(anyhow::anyhow!("File is write-only ({})", file.name));
@@ -55,7 +70,8 @@ impl Storage for StorageInterface {
 
         if !row.retrieved {
             let content = if !file.sha512.is_empty() {
-                self.obj_storage.get(&ObjInfo::new(file, &row.full_path))?
+                let info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
+                self.obj_storage.get(&info)?
             } else {
                 vec![]
             };
@@ -74,7 +90,9 @@ impl Storage for StorageInterface {
     }
 
     fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, anyhow::Error> {
-        let row = self.cache.get_mut(&file.id).unwrap();
+        let row = self.cache.get_mut(&file.id).ok_or_else(||
+            anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
+        )?;
 
         if row.mode & libc::O_RDONLY != 0 {
             return Err(anyhow::anyhow!("File is read-only"));
@@ -99,12 +117,14 @@ impl Storage for StorageInterface {
     fn close(&mut self, file: &mut FileRow) -> Result<bool, anyhow::Error> {
         let mut modified = false;
         {
-            let row = self.cache.get_mut(&file.id).unwrap();
+            let row = self.cache.get_mut(&file.id).ok_or_else(||
+                anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
+            )?;
 
             if row.modified {
                 // Shas of contents as id for the object
                 let sha512 = hex::encode(hmac_sha512::Hash::hash(&row.content));
-                let info = ObjInfo::new(file, &row.full_path);
+                let mut info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
 
                 // Remove old object
                 if !file.sha512.is_empty() && file.sha512 != sha512 {
@@ -112,9 +132,12 @@ impl Storage for StorageInterface {
                 }
 
                 // Store new object
+                info.sha512 = sha512.clone();
+                self.obj_storage.put(&info, &row.content)?;
+
                 file.sha512 = sha512;
                 file.size = row.content.len() as i64;
-                self.obj_storage.set(&info, &row.content)?;
+                file.updated_at = current_timestamp();
                 modified = true;
             }
         }
@@ -125,7 +148,7 @@ impl Storage for StorageInterface {
 
     fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), anyhow::Error> {
         if !file.sha512.is_empty() {
-            self.pending_remove.insert(ObjInfo::new(file, full_path));
+            self.pending_remove.insert(ObjInfo::new(file, &Self::path(&self.config, file, full_path)));
         }
         Ok(())
     }

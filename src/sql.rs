@@ -1,9 +1,12 @@
+use std::path::PathBuf;
 use anyhow::anyhow;
 use sqlite::{Bindable, State, Statement};
 
 pub struct SQL {
     pub connection: sqlite::Connection,
 }
+
+const ROOT_DIRECTORY_ID: i64 = 1;
 
 #[derive(Debug, Clone)]
 pub struct FileRow {
@@ -103,6 +106,27 @@ impl SQL {
             })
     }
 
+    pub fn get_file_by_path(self: &SQL, path: &str) -> Result<Option<FileRow>, anyhow::Error> {
+        let buff = PathBuf::from(path);
+        let mut current = ROOT_DIRECTORY_ID;
+
+        for part in buff.iter() {
+            let name = part.to_string_lossy();
+            let entry = self.find_directory_entry(current, &name)?;
+
+            match entry {
+                Some(e) => {
+                    current = e.entry_file_id;
+                },
+                None => {
+                    return Ok(None);
+                }
+            }
+        }
+
+        self.get_file(current)
+    }
+
     pub fn update_file(self: &SQL, file: &FileRow) -> Result<(), anyhow::Error> {
         self.execute11(
             "UPDATE files SET kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, sha512 = :sha512, accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at WHERE id = :id",
@@ -144,7 +168,7 @@ impl SQL {
 
     pub fn find_parent_directory(self: &SQL, file_id: i64) -> Result<Option<i64>, anyhow::Error> {
         self.get_row(
-            "SELECT directory_file_id FROM directory_entry WHERE entry_file_id = :file_id",
+            "SELECT directory_file_id FROM directory_entry WHERE entry_file_id = :file_id and name <> '.' and name <> '..'",
             &[(":file_id", file_id)][..],
             |row| {
                 Ok(row.read::<i64, _>("directory_file_id")?)
@@ -161,6 +185,11 @@ impl SQL {
                 return Err(anyhow!("Unable to get file path ({})", file_id));
             }
             let file = file.unwrap();
+
+            if file.name == "/" {
+                break;
+            }
+
             path_components.push(file.name.to_string());
 
             let parent_directory_id = self.find_parent_directory(current_file_id)?;

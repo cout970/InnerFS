@@ -1,13 +1,13 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context};
-use libc::{EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP};
 use crate::config::Config;
+use crate::current_timestamp;
 use crate::sql::{DirectoryEntry, FileRow, SQL};
 use crate::storage::Storage;
+use anyhow::{anyhow, Context};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP};
 
 pub struct SqlFileSystem {
     pub sql: Rc<SQL>,
@@ -86,7 +86,11 @@ impl SqlFileSystem {
         })
     }
 
-    pub fn mkdir(&mut self, parent: u64, name: &str, mode: u32) -> Result<FileRow, SqlFileSystemError> {
+    pub fn mkdir(&mut self, parent: u64, name: &str, uid: u32, gid: u32, mode: u32) -> Result<FileRow, SqlFileSystemError> {
+        if !self.is_validate_file_name(name) {
+            return error(EINVAL, anyhow!("Invalid file name: {}", name));
+        }
+
         self.get_file_or_err(parent as i64)?;
 
         self.transaction(|this| {
@@ -96,8 +100,8 @@ impl SqlFileSystem {
                 id: 0,
                 kind: 1,
                 name: name.to_string(),
-                uid: 0,
-                gid: 0,
+                uid: uid as i64,
+                gid: gid as i64,
                 perms: mode as i64,
                 size: 0,
                 sha512: "".to_string(),
@@ -142,11 +146,21 @@ impl SqlFileSystem {
         })
     }
 
-    pub fn mknod(&mut self, parent: i64, name: &str, mode: u32) -> Result<FileRow, SqlFileSystemError> {
+    pub fn mknod(&mut self, parent: i64, name: &str, uid: u32, gid: u32, mode: u32) -> Result<FileRow, SqlFileSystemError> {
+        if !self.is_validate_file_name(name) {
+            return error(EINVAL, anyhow!("Invalid file name: {}", name));
+        }
+
         let dir_file = self.get_file_or_err(parent)?;
 
         if dir_file.kind != 1 {
             return error(ENOTDIR, anyhow!("Not a directory: {}", parent));
+        }
+
+        let existing_entry = self.sql.find_directory_entry(dir_file.id, name)?;
+
+        if existing_entry.is_some() {
+            return error(EEXIST, anyhow!("File already exists: {}", name));
         }
 
         let id = self.transaction(|this| {
@@ -156,8 +170,8 @@ impl SqlFileSystem {
                 id: 0,
                 kind: 0,
                 name: name.to_string(),
-                uid: 0,
-                gid: 0,
+                uid: uid as i64,
+                gid: gid as i64,
                 perms: mode as i64,
                 size: 0,
                 sha512: "".to_string(),
@@ -185,6 +199,10 @@ impl SqlFileSystem {
     }
 
     pub fn unlink(&mut self, parent: i64, name: &str) -> Result<(), SqlFileSystemError> {
+        if !self.is_validate_file_name(name) {
+            return error(EINVAL, anyhow!("Invalid file name: {}", name));
+        }
+
         let dir_entry = self.find_directory_entry_or_err(parent, name)?;
         let file = self.get_file_or_err(dir_entry.entry_file_id)?;
 
@@ -200,6 +218,10 @@ impl SqlFileSystem {
     }
 
     pub fn rmdir(&mut self, parent: i64, name: &str) -> Result<(), SqlFileSystemError> {
+        if !self.is_validate_file_name(name) {
+            return error(EINVAL, anyhow!("Invalid file name: {}", name));
+        }
+
         let dir_entry = self.find_directory_entry_or_err(parent, name)?;
         let file = self.get_file_or_err(dir_entry.entry_file_id)?;
 
@@ -221,6 +243,14 @@ impl SqlFileSystem {
     }
 
     pub fn rename(&mut self, parent: i64, old_name: &str, new_name: &str) -> Result<(), SqlFileSystemError> {
+        if !self.is_validate_file_name(old_name) {
+            return error(EINVAL, anyhow!("Invalid file name: {}", old_name));
+        }
+
+        if !self.is_validate_file_name(new_name) {
+            return error(EINVAL, anyhow!("Invalid file name: {}", new_name));
+        }
+
         let entry = self.find_directory_entry_or_err(parent, &old_name)?;
 
         let new_entry = self.sql.find_directory_entry(parent, &new_name)?;
@@ -298,8 +328,14 @@ impl SqlFileSystem {
 
     pub fn cleanup(&mut self) -> Result<(), SqlFileSystemError> {
         let sql = self.sql.clone();
+        let config = self.config.clone();
         self.storage.cleanup(Box::new(move |info| {
-            Ok(sql.get_file_by_sha512(&info.sha512)?.is_some())
+            let file = if config.use_hash_as_filename {
+                sql.get_file_by_sha512(&info.sha512)?
+            } else {
+                sql.get_file_by_path(&info.full_path)?
+            };
+            Ok(file.is_some())
         }))?;
         Ok(())
     }
@@ -324,6 +360,10 @@ impl SqlFileSystem {
         Ok(entry.unwrap())
     }
 
+    pub fn is_validate_file_name(&self, name: &str) -> bool {
+        name.len() > 0 && name.len() <= 255 && !name.contains("/") && name != "." && name != ".."
+    }
+
     pub fn transaction<R>(&mut self, func: impl FnOnce(&mut Self) -> Result<R, SqlFileSystemError>) -> Result<R, SqlFileSystemError> {
         self.sql.connection.execute("BEGIN TRANSACTION").context("Database error")?;
         let res = func(self);
@@ -338,10 +378,6 @@ impl SqlFileSystem {
 
 fn error<T>(code: i32, error: anyhow::Error) -> Result<T, SqlFileSystemError> {
     Err(SqlFileSystemError { code, error })
-}
-
-fn current_timestamp() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 impl From<anyhow::Error> for SqlFileSystemError {

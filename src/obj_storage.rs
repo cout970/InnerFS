@@ -17,7 +17,7 @@ pub struct ObjInfo {
 
 pub trait ObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error>;
-    fn set(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error>;
+    fn put(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error>;
     fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error>;
 }
 
@@ -49,7 +49,7 @@ impl ObjectStorage for DebugObjectStorage {
         Ok(vec![])
     }
 
-    fn set(&mut self, name: &ObjInfo, _content: &[u8]) -> Result<(), anyhow::Error> {
+    fn put(&mut self, name: &ObjInfo, _content: &[u8]) -> Result<(), anyhow::Error> {
         println!("Create: {}", name);
         Ok(())
     }
@@ -67,22 +67,25 @@ pub struct FsObjectStorage {
 impl ObjectStorage for FsObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
         let mut path = self.base_path.clone();
-        path.push(format!("{}.dat", &info.sha512[..32]));
+        path.push(&info.full_path);
         println!("Get: {:?}", &path);
+
         fs::read(&path).context("FS failed to read file")
     }
 
-    fn set(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
+    fn put(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
         let mut path = self.base_path.clone();
-        path.push(format!("{}.dat", &info.sha512[..32]));
-        println!("Create: {:?}", &path);
+        path.push(&info.full_path);
+        println!("Put: {:?}", &path);
+
         fs::write(&path, content).context("FS failed to write file")
     }
 
     fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error> {
         let mut path = self.base_path.clone();
-        path.push(format!("{}.dat", &info.sha512[..32]));
+        path.push(&info.full_path);
         println!("Remove: {:?}", &path);
+
         fs::remove_file(&path).context("FS failed to remove file")
     }
 }
