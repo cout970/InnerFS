@@ -1,5 +1,5 @@
 use std::rc::Rc;
-
+use log::{info};
 use crate::obj_storage::{ObjectStorage, ObjInfo};
 use crate::sql::SQL;
 
@@ -26,7 +26,7 @@ pub struct SqlarFile {
 
 impl ObjectStorage for SqlarObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
-        println!("Get: {}", info);
+        info!("Get: {}", info);
         let name = info.full_path.clone();
         let file = self.get_sqlar_file(&name)?;
         if file.is_none() {
@@ -35,8 +35,8 @@ impl ObjectStorage for SqlarObjectStorage {
         Ok(file.unwrap().data)
     }
 
-    fn put(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
-        println!("Create: {}", info);
+    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
+        info!("Create: {}", info);
         let name = info.full_path.clone();
         let file = SqlarFile {
             name: name.clone(),
@@ -50,7 +50,7 @@ impl ObjectStorage for SqlarObjectStorage {
     }
 
     fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error> {
-        println!("Remove: {}", info);
+        info!("Remove: {}", info);
         let name = info.full_path.clone();
         self.remove_sqlar_file(&name)?;
         Ok(())

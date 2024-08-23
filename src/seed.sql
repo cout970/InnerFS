@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS files (
     perms INTEGER NOT NULL,
     size INTEGER NOT NULL,
     sha512 TEXT NOT NULL,
+    encryption_key TEXT NOT NULL,
     accessed_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -24,8 +25,8 @@ CREATE TABLE IF NOT EXISTS directory_entry (
     kind INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO files (id, kind, name, uid, gid, perms, size, sha512, accessed_at, created_at, updated_at)
-values (1, 1, '/', 0, 0, 511, 0, '', 0, 0, 0);
+INSERT OR IGNORE INTO files (id, kind, name, uid, gid, perms, size, sha512, encryption_key, accessed_at, created_at, updated_at)
+values (1, 1, '/', 0, 0, 511, 0, '', '', 0, 0, 0);
 
 INSERT OR IGNORE INTO directory_entry (id, directory_file_id, entry_file_id, name, kind)
 values (1, 1, 1, '.', 1), (2, 1, 1, '..', 1);

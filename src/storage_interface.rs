@@ -35,7 +35,7 @@ impl StorageInterface {
 
     pub fn path(config: &Config, file: &FileRow, full_path: &str) -> String {
         if config.use_hash_as_filename {
-            format!("{}.dat", &file.sha512[..32])
+            if file.sha512.is_empty() { "null".to_string() } else { format!("{}.dat", &file.sha512[..32]) }
         } else {
             full_path.trim_start_matches('/').to_string()
         }
@@ -124,18 +124,20 @@ impl Storage for StorageInterface {
             if row.modified {
                 // Shas of contents as id for the object
                 let sha512 = hex::encode(hmac_sha512::Hash::hash(&row.content));
-                let mut info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
 
                 // Remove old object
                 if !file.sha512.is_empty() && file.sha512 != sha512 {
-                    self.pending_remove.insert(info.clone());
+                    let info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
+                    self.pending_remove.insert(info);
                 }
 
-                // Store new object
-                info.sha512 = sha512.clone();
-                self.obj_storage.put(&info, &row.content)?;
-
                 file.sha512 = sha512;
+                let mut info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
+
+                // Store new object
+                self.obj_storage.put(&mut info, &row.content)?;
+                // Update file metadata
+                file.encryption_key = info.encryption_key;
                 file.size = row.content.len() as i64;
                 file.updated_at = current_timestamp();
                 modified = true;

@@ -4,6 +4,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
 use aws_types::region::Region;
+use log::{info};
 use tokio::runtime::{Builder, Runtime};
 
 use crate::config::Config;
@@ -45,7 +46,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        println!("Get: {:?}", &path);
+        info!("Get: {:?}", &path);
 
         self.rt.block_on(async {
             let res = self.client
@@ -59,10 +60,10 @@ impl ObjectStorage for S3ObjectStorage {
         })
     }
 
-    fn put(&mut self, info: &ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
+    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        println!("Create: {:?}", &path);
+        info!("Create: {:?}", &path);
 
         self.rt.block_on(async {
             self.client
@@ -79,7 +80,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        println!("Remove: {:?}", &path);
+        info!("Remove: {:?}", &path);
 
         self.rt.block_on(async {
             self.client

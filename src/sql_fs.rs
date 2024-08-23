@@ -105,6 +105,7 @@ impl SqlFileSystem {
                 perms: mode as i64,
                 size: 0,
                 sha512: "".to_string(),
+                encryption_key: "".to_string(),
                 accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
@@ -175,6 +176,7 @@ impl SqlFileSystem {
                 perms: mode as i64,
                 size: 0,
                 sha512: "".to_string(),
+                encryption_key: "".to_string(),
                 accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
@@ -330,6 +332,10 @@ impl SqlFileSystem {
         let sql = self.sql.clone();
         let config = self.config.clone();
         self.storage.cleanup(Box::new(move |info| {
+            // If file is encrypted, we cannot apply content deduplication
+            if !info.encryption_key.is_empty() {
+                return Ok(false);
+            }
             let file = if config.use_hash_as_filename {
                 sql.get_file_by_sha512(&info.sha512)?
             } else {

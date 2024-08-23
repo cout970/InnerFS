@@ -15,6 +15,7 @@ struct YamlConfig {
     s3_base_path: Option<String>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
+    encryption_key: Option<String>,
     update_access_time: Option<bool>,
     use_hash_as_filename: Option<bool>,
 }
@@ -38,6 +39,7 @@ pub struct Config {
     pub s3_base_path: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
+    pub encryption_key: String,
     pub update_access_time: bool,
     pub use_hash_as_filename: bool,
 }
@@ -65,6 +67,7 @@ pub fn read_config() -> Result<Rc<Config>, anyhow::Error> {
         s3_base_path: config.s3_base_path.unwrap_or("".to_string()),
         s3_access_key: config.s3_access_key.unwrap_or("".to_string()),
         s3_secret_key: config.s3_secret_key.unwrap_or("".to_string()),
+        encryption_key: config.encryption_key.unwrap_or("".to_string()),
         update_access_time: config.update_access_time.unwrap_or(true),
         use_hash_as_filename: config.use_hash_as_filename.unwrap_or(true),
     };

@@ -18,6 +18,7 @@ pub struct FileRow {
     pub perms: i64,
     pub size: i64,
     pub sha512: String,
+    pub encryption_key: String,
     pub accessed_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -45,9 +46,9 @@ impl SQL {
     }
 
     pub fn add_file(self: &SQL, file: &FileRow) -> Result<i64, anyhow::Error> {
-        self.execute10(
-            "INSERT INTO files (kind, name, uid, gid, perms, size, sha512, accessed_at, created_at, updated_at) \
-            VALUES (:kind, :name, :uid, :gid, :perms, :size, :sha512, :accessed_at, :created_at, :updated_at)",
+        self.execute11(
+            "INSERT INTO files (kind, name, uid, gid, perms, size, sha512, encryption_key, accessed_at, created_at, updated_at) \
+            VALUES (:kind, :name, :uid, :gid, :perms, :size, :sha512, :encryption_key, :accessed_at, :created_at, :updated_at)",
             (":kind", file.kind),
             (":name", file.name.as_str()),
             (":uid", file.uid),
@@ -55,6 +56,7 @@ impl SQL {
             (":perms", file.perms),
             (":size", file.size),
             (":sha512", file.sha512.as_str()),
+            (":encryption_key", file.encryption_key.as_str()),
             (":accessed_at", file.accessed_at),
             (":created_at", file.created_at),
             (":updated_at", file.updated_at),
@@ -78,6 +80,7 @@ impl SQL {
                     perms: row.read("perms")?,
                     size: row.read("size")?,
                     sha512: row.read("sha512")?,
+                    encryption_key: row.read("encryption_key")?,
                     accessed_at: row.read("accessed_at")?,
                     created_at: row.read("created_at")?,
                     updated_at: row.read("updated_at")?,
@@ -87,7 +90,7 @@ impl SQL {
 
     pub fn get_file_by_sha512(self: &SQL, sha512: &str) -> Result<Option<FileRow>, anyhow::Error> {
         self.get_row(
-            "SELECT * FROM files WHERE sha512 = :sha512",
+            "SELECT * FROM files WHERE sha512 = :sha512 LIMIT 1",
             (":sha512", sha512),
             |row| {
                 Ok(FileRow {
@@ -99,6 +102,7 @@ impl SQL {
                     perms: row.read("perms")?,
                     size: row.read("size")?,
                     sha512: row.read("sha512")?,
+                    encryption_key: row.read("encryption_key")?,
                     accessed_at: row.read("accessed_at")?,
                     created_at: row.read("created_at")?,
                     updated_at: row.read("updated_at")?,
@@ -128,8 +132,8 @@ impl SQL {
     }
 
     pub fn update_file(self: &SQL, file: &FileRow) -> Result<(), anyhow::Error> {
-        self.execute11(
-            "UPDATE files SET kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, sha512 = :sha512, accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at WHERE id = :id",
+        self.execute12(
+            "UPDATE files SET kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, sha512 = :sha512, encryption_key = :encryption_key, accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at WHERE id = :id",
             (":kind", file.kind),
             (":name", file.name.as_str()),
             (":uid", file.uid),
@@ -137,6 +141,7 @@ impl SQL {
             (":perms", file.perms),
             (":size", file.size),
             (":sha512", file.sha512.as_str()),
+            (":encryption_key", file.encryption_key.as_str()),
             (":accessed_at", file.accessed_at),
             (":created_at", file.created_at),
             (":updated_at", file.updated_at),
