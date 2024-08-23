@@ -4,7 +4,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use fuse::{FileAttr, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs, ReplyWrite, Request};
-use libc::{c_int, ENOENT, ENOSYS, EOPNOTSUPP, O_APPEND, O_CREAT, O_EXCL, O_NOCTTY, O_TRUNC, O_WRONLY};
+use libc::{c_int, ENOENT, ENOSYS, EOPNOTSUPP, O_APPEND, O_CREAT, O_EXCL, O_NOCTTY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
 use time::{get_time, Timespec};
 
 use crate::config::Config;
@@ -18,6 +18,55 @@ pub struct ProxyFileSystem {
     pub fs: SqlFileSystem,
     pub open_files: HashMap<u64, u64>,
     pub fh_counter: u64,
+}
+
+#[allow(dead_code)]
+pub struct OpenFlags {
+    pub read_only: bool,
+    pub write_only: bool,
+    pub read_write: bool,
+    pub append: bool,
+    pub create: bool,
+    pub exclusive: bool,
+    pub truncate: bool,
+    pub no_tty: bool,
+    pub other: i32,
+}
+
+impl OpenFlags {
+    pub fn from(flags: i32) -> Self {
+        OpenFlags {
+            read_only: flags & 0x03 == O_RDONLY,
+            write_only: flags & 0x03 == O_WRONLY,
+            read_write: flags & 0x03 == O_RDWR,
+            append: flags & O_APPEND != 0,
+            create: flags & O_CREAT != 0,
+            exclusive: flags & O_EXCL != 0,
+            truncate: flags & O_TRUNC != 0,
+            no_tty: flags & O_NOCTTY != 0,
+            other: flags & !(O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY),
+        }
+    }
+
+    pub fn to_safe_flags(&self) -> i32 {
+        let mut flags = 0;
+        if self.read_only {
+            flags |= O_RDONLY;
+        }
+        if self.write_only {
+            flags |= O_WRONLY;
+        }
+        if self.read_write {
+            flags |= O_RDWR;
+        }
+        if self.append {
+            flags |= O_APPEND;
+        }
+        if self.create {
+            flags |= O_CREAT;
+        }
+        flags | self.other
+    }
 }
 
 impl ProxyFileSystem {
@@ -203,6 +252,9 @@ impl Filesystem for ProxyFileSystem {
     fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         println!("FS open(ino: {}, flags: {})", ino, flags);
 
+        let open_flags = OpenFlags::from(flags as i32);
+        let flags = open_flags.to_safe_flags() as u32;
+
         match self.fs.open(ino as i64, flags) {
             Ok(_) => {
                 self.fh_counter += 1;
@@ -324,30 +376,11 @@ impl Filesystem for ProxyFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn create(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, req_flags: u32, reply: ReplyCreate) {
-        println!("FS create(parent: {}, name: {:?}, mode: {}, flags: {})", parent, name, mode, req_flags);
-        let req_flags = req_flags as i32;
+    fn create(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, flags: u32, reply: ReplyCreate) {
+        println!("FS create(parent: {}, name: {:?}, mode: {}, flags: {})", parent, name, mode, flags);
 
-        let write_only = req_flags & O_WRONLY != 0;
-        let append = req_flags & O_APPEND != 0;
-        let create = req_flags & O_CREAT != 0;
-        // let exclusive = req_flags & O_EXCL != 0;
-        // let truncate = req_flags & O_TRUNC != 0;
-        // let no_tty = req_flags & O_NOCTTY != 0;
-        // let remaining = req_flags & !(O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY);
-
-        // Supported flags
-        let mut flags = 0;
-        if write_only {
-            flags |= O_WRONLY;
-        }
-        if append {
-            flags |= O_APPEND;
-        }
-        if create {
-            flags |= O_CREAT;
-        }
-        let flags = flags as u32;
+        let open_flags = OpenFlags::from(flags as i32);
+        let flags = open_flags.to_safe_flags() as u32;
 
         let name = name.to_string_lossy();
         let file = match self.fs.lookup(parent, &name) {
