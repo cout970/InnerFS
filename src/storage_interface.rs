@@ -105,11 +105,18 @@ impl Storage for StorageInterface {
 
         let offset = offset as usize;
 
-        if offset + buff.len() > row.content.len() {
-            row.content.resize(offset + buff.len(), 0);
+
+        if offset == buff.len() {
+            // Append to the end
+            row.content.extend(buff.iter());
+        } else {
+            // Overwrite
+            if offset + buff.len() > row.content.len() {
+                row.content.resize(offset + buff.len(), 0);
+            }
+            row.content[offset..offset + buff.len()].copy_from_slice(buff);
         }
 
-        row.content[offset..offset + buff.len()].copy_from_slice(buff);
         row.modified = true;
         Ok(buff.len())
     }
