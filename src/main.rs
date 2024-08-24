@@ -1,3 +1,5 @@
+use fs::File;
+use std::fmt::{Display, Formatter};
 use crate::config::{read_config, StorageOption};
 use crate::encryption::EncryptedObjectStorage;
 use crate::obj_storage::{FsObjectStorage, ObjectStorage};
@@ -7,12 +9,15 @@ use crate::sql::{SQL};
 use crate::sqlar::SqlarObjectStorage;
 use crate::storage_interface::StorageInterface;
 use env_logger::Env;
-use log::info;
-use std::fs;
-use std::path::PathBuf;
+use log::{error, info, warn};
+use std::{env, fs};
+use std::ffi::OsStr;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use anyhow::Context;
 
 mod config;
 mod sql;
@@ -27,8 +32,13 @@ mod encryption;
 mod fs_tree;
 
 use crate::sql_fs::SqlFileSystem;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use flate2::read::GzDecoder;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipWriter};
+use crate::fs_tree::FsTreeKind;
 
+/// Utility to mount a shadow filesystem, supports encryption and multiple storage backends: S3, Sqlar and FileSystem
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
@@ -57,15 +67,34 @@ enum Commands {
     /// Export the file metadata index to a file
     ExportIndex {
         /// export format: json or yaml
-        #[arg(short, long)]
-        format: String,
+        #[arg(short, long, value_enum, default_value_t = IndexExportFormat::Json)]
+        format: IndexExportFormat,
     },
     /// Export the whole filesystem to a file
     ExportFiles {
         /// export format: tar or zip
-        #[arg(short, long)]
-        format: String,
+        #[arg(short, long, value_enum, default_value_t = FileExportFormat::Directory)]
+        format: FileExportFormat,
+
+        /// Export path
+        #[arg(short, long, value_name = "FILE")]
+        path: PathBuf,
     },
+    // Generate a default config file
+    GenerateConfig,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum IndexExportFormat {
+    Json,
+    Yaml,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FileExportFormat {
+    Directory,
+    Tar,
+    Zip,
 }
 
 fn main() {
@@ -76,6 +105,35 @@ fn main() {
 
     let config_path = cli.config.or_else(|| Some(PathBuf::from("./config.yml"))).unwrap();
 
+    // This needs to be done before the check for the config file
+    if let Some(Commands::GenerateConfig) = &cli.command {
+        if fs::metadata(&config_path).is_ok() {
+            warn!("Config file already exists at {:?}, Type 'yes' or 'y' to override this file", &config_path);
+            if !ask_for_confirmation() {
+                info!("Operation cancelled");
+                return;
+            }
+        }
+
+        let data = include_str!("./default_config.yml");
+        fs::write(&config_path, data).expect("Unable to write config file");
+        info!("Config file generated at {:?}", config_path);
+        return;
+    }
+
+    if fs::metadata(&config_path).is_err() {
+        let program_name = env::args().next()
+            .as_ref()
+            .map(Path::new)
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .map(String::from)
+            .unwrap();
+
+        error!("Config file not found at {:?}, try './{} generate-config'", &config_path, program_name);
+        return;
+    }
+
     info!("Starting");
     let config = read_config(&config_path).expect("Unable to read config");
 
@@ -84,7 +142,7 @@ fn main() {
 
     info!("Database opened");
     // Select the appropriate storage backend
-    let mut obj_storage: Box<dyn ObjectStorage> = match config.storage_option {
+    let mut obj_storage: Box<dyn ObjectStorage> = match config.storage_backend {
         StorageOption::FileSystem => {
             Box::new(FsObjectStorage {
                 base_path: PathBuf::from(&config.blob_storage),
@@ -114,8 +172,9 @@ fn main() {
     match cmd {
         Commands::Mount => mount(fs),
         Commands::Nuke { force } => nuke(fs, force),
-        Commands::ExportIndex { format } => export_index(fs, format),
-        Commands::ExportFiles { format } => export_files(fs, format),
+        Commands::ExportIndex { format } => export_index(fs, format).unwrap(),
+        Commands::ExportFiles { format, path } => export_files(fs, format, path).unwrap(),
+        Commands::GenerateConfig => unreachable!()
     }
 }
 
@@ -144,12 +203,9 @@ fn mount(fs: SqlFileSystem) {
 
 fn nuke(mut fs: SqlFileSystem, force: bool) {
     if !force {
-        let mut input = String::new();
-        println!("Are you sure you want to delete all data? This operation is irreversible. Type 'yes' or 'y' to confirm");
-        std::io::stdin().read_line(&mut input).unwrap();
-        let choice = input.trim().to_ascii_lowercase();
-        if choice != "yes" && choice != "y" {
-            println!("Operation cancelled");
+        warn!("Are you sure you want to delete all data? This operation is irreversible. Type 'yes' or 'y' to confirm");
+        if !ask_for_confirmation() {
+            info!("Operation cancelled");
             return;
         }
     }
@@ -160,55 +216,149 @@ fn nuke(mut fs: SqlFileSystem, force: bool) {
     info!("Done");
 }
 
-fn export_index(fs: SqlFileSystem, format: String) {
+fn export_index(fs: SqlFileSystem, format: IndexExportFormat) -> Result<(), anyhow::Error> {
     info!("Exporting index");
-    let tree = fs.sql.get_tree().unwrap();
+    let tree = fs.sql.get_tree()?;
 
-    let data = match format.as_str() {
-        "json" => serde_json::to_string_pretty(&tree).unwrap(),
-        "yml" | "yaml" => serde_yml::to_string(&tree).unwrap(),
-        _ => panic!("Invalid format"),
+    let data = match format {
+        IndexExportFormat::Json => serde_json::to_string_pretty(&tree)?,
+        IndexExportFormat::Yaml => serde_yml::to_string(&tree)?,
     };
 
     let path = format!("./index.{}", format);
-    fs::write(&path, data).expect("Unable to write index file");
+    fs::write(&path, data).context("Unable to write index file")?;
     info!("Index exported to {}", &path);
+    Ok(())
 }
 
-fn export_files(_fs: SqlFileSystem, _format: String) {
-    // info!("Exporting files");
-    // let files = fs.storage.export_files();
-    // let data = match format.as_str() {
-    //     "tar" => {
-    //         let mut archive = tar::Builder::new(Vec::new());
-    //         for file in files {
-    //             let path = file.full_path.clone();
-    //             let content = fs.storage.get(&file).unwrap();
-    //             let mut header = tar::Header::new_gnu();
-    //             header.set_path(&path).unwrap();
-    //             header.set_size(content.len() as u64);
-    //             archive.append(&header, content.as_slice()).unwrap();
-    //         }
-    //         archive.into_inner().unwrap()
-    //     }
-    //     "zip" => {
-    //         let mut archive = zip::ZipWriter::new(Vec::new());
-    //         for file in files {
-    //             let path = file.full_path.clone();
-    //             let content = fs.storage.get(&file).unwrap();
-    //             archive.start_file(&path, Default::default()).unwrap();
-    //             archive.write_all(content.as_slice()).unwrap();
-    //         }
-    //         archive.finish().unwrap()
-    //     }
-    //     _ => panic!("Invalid format"),
-    // };
-    //
-    // let path = fs.config.mount_point.clone() + "/files." + &format;
-    // fs::write(&path, data).expect("Unable to write files archive");
-    // info!("Files exported to {}", &path);
+fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathBuf) -> Result<(), anyhow::Error> {
+    info!("Exporting files to {:?}", &path);
+    let tree = fs.sql.get_tree()?;
+
+    match format {
+        FileExportFormat::Directory => {
+            let mut queue = vec![(tree, path.clone())];
+
+            fs::create_dir_all(&path)?;
+
+            while !queue.is_empty() {
+                let (node_ref, sub_path) = queue.pop().unwrap();
+                let dir_node = node_ref.borrow();
+
+                for child_red in &dir_node.children {
+                    let child = child_red.borrow();
+                    let child_path = sub_path.join(&child.name);
+
+                    if child.kind == FsTreeKind::Directory {
+                        fs::create_dir_all(&child_path)?;
+                        queue.push((child_red.clone(), child_path));
+                    } else {
+                        let data = fs.read_all(child.id)?;
+                        fs::write(&child_path, data).context("Unable to write file")?;
+                    }
+                }
+            }
+        }
+        FileExportFormat::Tar => {
+            if !path.ends_with(".tar.gz") {
+                path = path.with_extension("tar.gz");
+            }
+
+            let mut tar = tar::Builder::new(GzDecoder::new(File::create(&path)?));
+
+            let mut queue = vec![(tree, PathBuf::new())];
+
+            while !queue.is_empty() {
+                let (node_ref, sub_path) = queue.pop().unwrap();
+                let dir_node = node_ref.borrow();
+
+                for child_red in &dir_node.children {
+                    let child = child_red.borrow();
+                    let child_path = sub_path.join(&child.name);
+
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(child.size as u64);
+                    header.set_mtime(child.updated_at as u64);
+                    header.set_mode(child.perms as u32);
+                    header.set_uid(child.uid as u64);
+                    header.set_gid(child.gid as u64);
+                    header.set_entry_type(if child.kind == FsTreeKind::Directory { tar::EntryType::Directory } else { tar::EntryType::Regular });
+                    header.set_cksum();
+
+                    if child.kind == FsTreeKind::Directory {
+                        tar.append_data(&mut header, &child_path, &mut std::io::empty())?;
+                        queue.push((child_red.clone(), child_path));
+                    } else {
+                        let data = fs.read_all(child.id)?;
+                        tar.append_data(&mut header, &child_path, data.as_slice())?;
+                    }
+                }
+            }
+
+            tar.finish()?;
+        }
+        FileExportFormat::Zip => {
+            if !path.ends_with(".zip") {
+                path = path.with_extension("zip");
+            }
+            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            let mut zip = ZipWriter::new(File::create(&path)?);
+
+            let mut queue = vec![(tree, PathBuf::new())];
+
+            while !queue.is_empty() {
+                let (node_ref, sub_path) = queue.pop().unwrap();
+                let dir_node = node_ref.borrow();
+
+                for child_red in &dir_node.children {
+                    let child = child_red.borrow();
+                    let child_path = sub_path.join(&child.name);
+
+                    if child.kind == FsTreeKind::Directory {
+                        zip.add_directory_from_path(&child_path, options)?;
+                        queue.push((child_red.clone(), child_path));
+                    } else {
+                        let data = fs.read_all(child.id)?;
+                        zip.start_file_from_path(child_path, options)?;
+                        zip.write_all(&data)?;
+                    }
+                }
+            }
+
+            zip.finish()?;
+        }
+    };
+
+    info!("Files exported successfully");
+    Ok(())
+}
+
+pub fn ask_for_confirmation() -> bool {
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let choice = input.trim().to_ascii_lowercase();
+    choice == "yes" || choice == "y"
 }
 
 pub fn current_timestamp() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+impl Display for IndexExportFormat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexExportFormat::Json => write!(f, "json"),
+            IndexExportFormat::Yaml => write!(f, "yaml"),
+        }
+    }
+}
+
+impl Display for FileExportFormat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileExportFormat::Directory => write!(f, "directory"),
+            FileExportFormat::Tar => write!(f, "tar"),
+            FileExportFormat::Zip => write!(f, "zip"),
+        }
+    }
 }

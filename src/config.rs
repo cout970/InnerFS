@@ -9,7 +9,7 @@ struct YamlConfig {
     database_file: Option<String>,
     mount_point: Option<String>,
     blob_storage: Option<String>,
-    storage_option: Option<String>,
+    storage_backend: Option<String>,
     s3_endpoint_url: Option<String>,
     s3_region: Option<String>,
     s3_bucket: Option<String>,
@@ -33,7 +33,7 @@ pub struct Config {
     pub database_file: String,
     pub mount_point: String,
     pub blob_storage: String,
-    pub storage_option: StorageOption,
+    pub storage_backend: StorageOption,
     pub s3_endpoint_url: String,
     pub s3_region: String,
     pub s3_bucket: String,
@@ -52,14 +52,14 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
     let config: YamlConfig = serde_yml::from_str(&yaml_config)
         .map_err(|e| anyhow!("Unable to parse YAML config file {:?}: {}", config_path, e))?;
 
-    let binding = config.storage_option.as_ref()
+    let binding = config.storage_backend.as_ref()
         .map(|i| i.as_str())
         .unwrap_or("FileSystem")
         .to_ascii_lowercase();
 
-    let storage_option_str = binding.as_str();
+    let storage_backend_str = binding.as_str();
 
-    let storage_option = match storage_option_str {
+    let storage_backend = match storage_backend_str {
         "filesystem" => StorageOption::FileSystem,
         "sqlar" => StorageOption::Sqlar,
         "s3" => StorageOption::S3,
@@ -69,7 +69,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
     let cfg = Config {
         database_file: config.database_file.unwrap_or("./index.db".to_string()),
         mount_point: config.mount_point.unwrap_or("./data".to_string()),
-        storage_option,
+        storage_backend,
         blob_storage: config.blob_storage.unwrap_or("./blob".to_string()),
         s3_endpoint_url: config.s3_endpoint_url.unwrap_or("".to_string()),
         s3_region: config.s3_region.unwrap_or("".to_string()),
@@ -84,7 +84,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
 
     let mut errors = vec![];
 
-    if cfg.storage_option == StorageOption::S3 {
+    if cfg.storage_backend == StorageOption::S3 {
         if cfg.s3_access_key.is_empty() {
             errors.push("S3 access key is required".to_string());
         }
@@ -99,7 +99,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
         }
     }
 
-    if cfg.storage_option == StorageOption::FileSystem {
+    if cfg.storage_backend == StorageOption::FileSystem {
         if cfg.blob_storage.is_empty() {
             errors.push("Blob storage path is required for FileSystem storage option".to_string());
         }

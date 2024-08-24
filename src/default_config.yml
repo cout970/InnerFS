@@ -1,0 +1,51 @@
+########################################################################################################################
+# Default configuration file                                                                                           #
+########################################################################################################################
+
+# Path were to store the metadata database (will also generate index.db-shm and index.db-wal files).
+database_file: ./index.db
+
+# Path where to mount the filesystem, must already exist and be a directory.
+mount_point: ./data
+
+# Storage backend, can be either:
+# - filesystem: store blobs on the local path, see [blob_storage]
+# - s3: store blobs on an S3 compatible storage, see other S3 options
+# - sqlar: store blobs directly in the database, see https://sqlite.org/sqlar.html
+storage_backend: filesystem
+
+# Required if [storage_backend] is filesystem.
+# Path where to store the blobs, must already exist and be a directory.
+blob_storage: ./blob
+
+# Required if [storage_backend] is S3.
+# S3 bucket name
+s3_bucket: my-bucket
+
+# S3 region, ignored if [s3_endpoint_url] is not empty
+s3_region: localhost
+
+# S3 endpoint URL, for providers other than AWS, like https://min.io/
+s3_endpoint_url: 'http://localhost:9000'
+
+# S3 access key
+s3_access_key: '********************'
+
+# S3 secret key
+s3_secret_key: '****************************************'
+
+# If set, all blobs will be encrypted using AES-256-GCM, the key will unique for each blob
+# and derived from this value using PBKDF2-HMAC-SHA256 and salt
+encryption_key: ''
+
+# If set to true, the blobs will be stored on a single folder with a hash as filename
+# otherwise, the original full path will be preserved
+# It is recommended to set this to true if using encryption, otherwise the directory structure
+# and filenames will be visible
+use_hash_as_filename: false
+
+# If set to true, the last access time of files will be tracked and stored in the database
+# It is recommended to keep this disabled to improve performance, if you don't need this feature
+update_access_time: false
+
+########################################################################################################################

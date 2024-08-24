@@ -1,3 +1,4 @@
+
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
@@ -7,7 +8,7 @@ use crate::current_timestamp;
 use crate::sql::{DirectoryEntry, FileRow, SQL};
 use crate::storage::Storage;
 use anyhow::{anyhow, Context};
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP, O_RDONLY};
 
 pub struct SqlFileSystem {
     pub sql: Rc<SQL>,
@@ -24,6 +25,43 @@ pub struct SqlFileSystemError {
 impl SqlFileSystem {
     pub fn new(sql: Rc<SQL>, config: Rc<Config>, storage: Box<dyn Storage>) -> Self {
         Self { sql, config, storage }
+    }
+
+    pub fn read_all(&mut self, id: i64) -> Result<Vec<u8>, SqlFileSystemError> {
+        const BLOCK_SIZE: usize = 65536; // 64kb
+
+        let mut file = self.get_file_or_err(id)?;
+        let full_path = self.sql.get_file_path(file.id)?;
+        let modified = self.storage.open(&mut file, &full_path, O_RDONLY as u32)?;
+
+        if modified {
+            self.sql.update_file(&file)?;
+        } else if self.config.update_access_time {
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
+        }
+
+        let mut complete_buff: Vec<u8> = Vec::with_capacity(file.size as usize);
+        let mut buff = vec![0u8; BLOCK_SIZE];
+        let mut offset = 0;
+
+        loop {
+            let len = self.storage.read(&file, offset as u64, &mut buff)?;
+            if len == 0 {
+                break;
+            }
+            offset += len;
+            complete_buff.extend(&buff[..len]);
+        }
+
+        let modified = self.storage.close(&mut file)?;
+        if modified {
+            self.sql.update_file(&file)?;
+        } else if self.config.update_access_time {
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
+        }
+
+        self.cleanup()?;
+        Ok(complete_buff)
     }
 
     pub fn lookup(&mut self, parent: u64, name: &str) -> Result<Option<FileRow>, SqlFileSystemError> {

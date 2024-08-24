@@ -7,9 +7,10 @@
 - [x] CLI Option to delete all data 
 - [x] Export index to json/yaml
 - [x] Nuke all data
-- Export file to folder
-- Export file to tar
-- Export file to zip
+- [x] Export files to folder
+- [x] Export files to tar
+- [x] Export files to zip
+- Verify integrity of files, check sha512 and size
 - Import index from json/yaml
 - Sync between machines (add modification journal, monotonic change id, mark removed files, etc.)
 - Sync with folder, like rsync
