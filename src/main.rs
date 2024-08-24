@@ -33,10 +33,10 @@ mod fs_tree;
 
 use crate::sql_fs::SqlFileSystem;
 use clap::{Parser, Subcommand, ValueEnum};
-use flate2::read::GzDecoder;
+use flate2::{write::GzEncoder, Compression};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
-use crate::fs_tree::FsTreeKind;
+use crate::fs_tree::{FsTree, FsTreeKind};
 
 /// Utility to mount a shadow filesystem, supports encryption and multiple storage backends: S3, Sqlar and FileSystem
 #[derive(Parser)]
@@ -237,63 +237,48 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
 
     match format {
         FileExportFormat::Directory => {
-            let mut queue = vec![(tree, path.clone())];
-
             fs::create_dir_all(&path)?;
 
-            while !queue.is_empty() {
-                let (node_ref, sub_path) = queue.pop().unwrap();
-                let dir_node = node_ref.borrow();
+            FsTree::for_each(tree, |child, child_path| {
+                let child_path = path.join(child_path);
 
-                for child_red in &dir_node.children {
-                    let child = child_red.borrow();
-                    let child_path = sub_path.join(&child.name);
-
-                    if child.kind == FsTreeKind::Directory {
-                        fs::create_dir_all(&child_path)?;
-                        queue.push((child_red.clone(), child_path));
-                    } else {
-                        let data = fs.read_all(child.id)?;
-                        fs::write(&child_path, data).context("Unable to write file")?;
-                    }
+                if child.kind == FsTreeKind::Directory {
+                    fs::create_dir_all(&child_path)?;
+                } else {
+                    let data = fs.read_all(child.id)?;
+                    fs::write(&child_path, data).context("Unable to write file")?;
                 }
-            }
+
+                Ok(())
+            })?;
         }
         FileExportFormat::Tar => {
             if !path.ends_with(".tar.gz") {
                 path = path.with_extension("tar.gz");
             }
 
-            let mut tar = tar::Builder::new(GzDecoder::new(File::create(&path)?));
+            let file = File::create(&path)?;
+            let mut gz = GzEncoder::new(file, Compression::default());
+            let mut tar = tar::Builder::new(&mut gz);
 
-            let mut queue = vec![(tree, PathBuf::new())];
+            FsTree::for_each(tree, |child, child_path| {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(child.size as u64);
+                header.set_mtime(child.updated_at as u64);
+                header.set_mode(child.perms as u32);
+                header.set_uid(child.uid as u64);
+                header.set_gid(child.gid as u64);
+                header.set_entry_type(if child.kind == FsTreeKind::Directory { tar::EntryType::Directory } else { tar::EntryType::Regular });
+                header.set_cksum();
 
-            while !queue.is_empty() {
-                let (node_ref, sub_path) = queue.pop().unwrap();
-                let dir_node = node_ref.borrow();
-
-                for child_red in &dir_node.children {
-                    let child = child_red.borrow();
-                    let child_path = sub_path.join(&child.name);
-
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(child.size as u64);
-                    header.set_mtime(child.updated_at as u64);
-                    header.set_mode(child.perms as u32);
-                    header.set_uid(child.uid as u64);
-                    header.set_gid(child.gid as u64);
-                    header.set_entry_type(if child.kind == FsTreeKind::Directory { tar::EntryType::Directory } else { tar::EntryType::Regular });
-                    header.set_cksum();
-
-                    if child.kind == FsTreeKind::Directory {
-                        tar.append_data(&mut header, &child_path, &mut std::io::empty())?;
-                        queue.push((child_red.clone(), child_path));
-                    } else {
-                        let data = fs.read_all(child.id)?;
-                        tar.append_data(&mut header, &child_path, data.as_slice())?;
-                    }
+                if child.kind == FsTreeKind::Directory {
+                    tar.append_data(&mut header, &child_path, &mut std::io::empty())?;
+                } else {
+                    let data = fs.read_all(child.id)?;
+                    tar.append_data(&mut header, &child_path, data.as_slice())?;
                 }
-            }
+                Ok(())
+            })?;
 
             tar.finish()?;
         }
@@ -304,26 +289,16 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
             let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             let mut zip = ZipWriter::new(File::create(&path)?);
 
-            let mut queue = vec![(tree, PathBuf::new())];
-
-            while !queue.is_empty() {
-                let (node_ref, sub_path) = queue.pop().unwrap();
-                let dir_node = node_ref.borrow();
-
-                for child_red in &dir_node.children {
-                    let child = child_red.borrow();
-                    let child_path = sub_path.join(&child.name);
-
-                    if child.kind == FsTreeKind::Directory {
-                        zip.add_directory_from_path(&child_path, options)?;
-                        queue.push((child_red.clone(), child_path));
-                    } else {
-                        let data = fs.read_all(child.id)?;
-                        zip.start_file_from_path(child_path, options)?;
-                        zip.write_all(&data)?;
-                    }
+            FsTree::for_each(tree, |child, child_path| {
+                if child.kind == FsTreeKind::Directory {
+                    zip.add_directory_from_path(&child_path, options)?;
+                } else {
+                    let data = fs.read_all(child.id)?;
+                    zip.start_file_from_path(child_path, options)?;
+                    zip.write_all(&data)?;
                 }
-            }
+                Ok(())
+            })?;
 
             zip.finish()?;
         }

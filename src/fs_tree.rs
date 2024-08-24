@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use crate::sql::{FileRow, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ pub enum FsTreeKind {
     Directory,
 }
 
-impl <'a> From<FileRow> for FsTree {
+impl<'a> From<FileRow> for FsTree {
     fn from(value: FileRow) -> FsTree {
         FsTree {
             id: value.id,
@@ -49,5 +50,32 @@ impl <'a> From<FileRow> for FsTree {
             updated_at: value.updated_at,
             children: vec![],
         }
+    }
+}
+
+impl FsTree {
+    pub fn for_each<F>(root: FsTreeRef, mut func: F) -> Result<(), anyhow::Error>
+    where
+        F: FnMut(&FsTree, PathBuf) -> Result<(), anyhow::Error>,
+    {
+        let mut queue = vec![(root, PathBuf::new())];
+
+        while !queue.is_empty() {
+            let (node_ref, sub_path) = queue.pop().unwrap();
+            let dir_node = node_ref.borrow();
+
+            for child_ref in &dir_node.children {
+                let child = child_ref.borrow();
+                let child_path = sub_path.join(&child.name);
+
+                if child.kind == FsTreeKind::Directory {
+                    queue.push((child_ref.clone(), child_path.clone()));
+                }
+
+                func(&child, child_path)?;
+            }
+        }
+
+        Ok(())
     }
 }
