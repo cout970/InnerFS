@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::{PathBuf};
 use std::rc::Rc;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -44,12 +45,21 @@ pub struct Config {
     pub use_hash_as_filename: bool,
 }
 
-pub fn read_config() -> Result<Rc<Config>, anyhow::Error> {
-    let yaml_config = fs::read_to_string("config.yml").expect("Unable to read file './config.yml'");
-    let config: YamlConfig = serde_yml::from_str(&yaml_config).expect("Unable to parse yaml");
+pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
+    let yaml_config = fs::read_to_string(config_path)
+        .map_err(|e| anyhow!("Unable to read config file {:?}: {}", config_path, e))?;
 
-    let storage_option_str = config.storage_option.unwrap_or("FileSystem".to_string());
-    let storage_option = match storage_option_str.as_str().to_ascii_lowercase().as_str() {
+    let config: YamlConfig = serde_yml::from_str(&yaml_config)
+        .map_err(|e| anyhow!("Unable to parse YAML config file {:?}: {}", config_path, e))?;
+
+    let binding = config.storage_option.as_ref()
+        .map(|i| i.as_str())
+        .unwrap_or("FileSystem")
+        .to_ascii_lowercase();
+
+    let storage_option_str = binding.as_str();
+
+    let storage_option = match storage_option_str {
         "filesystem" => StorageOption::FileSystem,
         "sqlar" => StorageOption::Sqlar,
         "s3" => StorageOption::S3,
@@ -83,6 +93,9 @@ pub fn read_config() -> Result<Rc<Config>, anyhow::Error> {
         }
         if cfg.s3_bucket.is_empty() {
             errors.push("S3 bucket is required".to_string());
+        }
+        if cfg.s3_region.is_empty() && cfg.s3_endpoint_url.is_empty() {
+            errors.push("S3 region or endpoint_url must be provided".to_string());
         }
     }
 

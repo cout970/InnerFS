@@ -1,17 +1,14 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::rc::Rc;
 
 use fuse::{FileAttr, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs, ReplyWrite, Request};
 use libc::{c_int, ENOENT, ENOSYS, EOPNOTSUPP, O_APPEND, O_CREAT, O_EXCL, O_NOCTTY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
 use log::{error, trace, warn};
 use time::{get_time, Timespec};
 
-use crate::config::Config;
-use crate::sql::{FileRow, SQL};
+use crate::sql::{FileRow};
 use crate::sql_fs::SqlFileSystem;
-use crate::storage::Storage;
 
 const BLOCK_SIZE: u32 = 65536; // 64kb
 
@@ -71,9 +68,9 @@ impl OpenFlags {
 }
 
 impl ProxyFileSystem {
-    pub fn new(sql: Rc<SQL>, config: Rc<Config>, storage: Box<dyn Storage>) -> Self {
+    pub fn new(fs: SqlFileSystem) -> Self {
         ProxyFileSystem {
-            fs: SqlFileSystem::new(sql, config, storage),
+            fs,
             open_files: HashMap::new(),
             fh_counter: 0,
         }

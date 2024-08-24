@@ -174,4 +174,10 @@ impl Storage for StorageInterface {
         self.pending_remove.clear();
         Ok(())
     }
+
+    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+        self.cache.clear();
+        self.pending_remove.clear();
+        self.obj_storage.nuke()
+    }
 }

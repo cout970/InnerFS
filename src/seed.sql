@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS directory_entry (
 );
 
 INSERT OR IGNORE INTO files (id, kind, name, uid, gid, perms, size, sha512, encryption_key, accessed_at, created_at, updated_at)
-values (1, 1, '/', 0, 0, 511, 0, '', '', 0, 0, 0);
+values (1, 1, '/', 1000, 1000, 493, 0, '', '', unixepoch("now"), unixepoch("now"), unixepoch("now"));
 
 INSERT OR IGNORE INTO directory_entry (id, directory_file_id, entry_file_id, name, kind)
 values (1, 1, 1, '.', 1), (2, 1, 1, '..', 1);

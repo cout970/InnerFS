@@ -1,12 +1,18 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use anyhow::anyhow;
 use sqlite::{Bindable, State, Statement};
+use crate::fs_tree::{FsTree, FsTreeRef};
 
 pub struct SQL {
     pub connection: sqlite::Connection,
 }
 
-const ROOT_DIRECTORY_ID: i64 = 1;
+pub const ROOT_DIRECTORY_ID: i64 = 1;
+pub const FILE_KIND_REGULAR: i64 = 0;
+pub const FILE_KIND_DIRECTORY: i64 = 1;
 
 #[derive(Debug, Clone)]
 pub struct FileRow {
@@ -121,7 +127,7 @@ impl SQL {
             match entry {
                 Some(e) => {
                     current = e.entry_file_id;
-                },
+                }
                 None => {
                     return Ok(None);
                 }
@@ -279,6 +285,75 @@ impl SQL {
             (":accessed_at", accessed_at),
             (":id", id),
         )?;
+        Ok(())
+    }
+
+    pub fn get_tree(&self) -> Result<FsTreeRef, anyhow::Error> {
+        #[allow(clippy::unnecessary_cast)]
+        let entries: Vec<DirectoryEntry> = self.get_rows(
+            "SELECT * FROM directory_entry",
+            ([] as [i64; 0]).as_ref(),
+            |row| {
+                Ok(DirectoryEntry {
+                    id: row.read("id")?,
+                    directory_file_id: row.read("directory_file_id")?,
+                    entry_file_id: row.read("entry_file_id")?,
+                    name: row.read("name")?,
+                    kind: row.read("kind")?,
+                })
+            })?;
+
+        // In memory index of directory entries
+        let mut children: HashMap<i64, Vec<DirectoryEntry>> = HashMap::new();
+
+        for e in entries {
+            if e.name == "." || e.name == ".." {
+                continue;
+            }
+            match children.get_mut(&e.directory_file_id) {
+                Some(vec) => {
+                    vec.push(e);
+                }
+                None => {
+                    children.insert(e.directory_file_id, vec![e]);
+                }
+            }
+        }
+
+        let root: FsTree = self.get_file(ROOT_DIRECTORY_ID)?.unwrap().into();
+
+        let mut by_id: HashMap<i64, Rc<RefCell<FsTree>>> = HashMap::new();
+        let mut queue = vec![];
+
+        queue.push(root.id);
+        by_id.insert(root.id, Rc::new(RefCell::new(root)));
+
+        while !queue.is_empty() {
+            let node_id = queue.pop().unwrap();
+
+            for c in children.get(&node_id).cloned().unwrap_or_else(|| vec![]) {
+                queue.push(c.entry_file_id);
+                let file = self.get_file(c.entry_file_id)?.unwrap();
+                let new_node: FsTree = file.into();
+                let new_node_id = new_node.id;
+                let new_node = Rc::new(RefCell::new(new_node));
+
+                by_id.insert(new_node_id, new_node.clone());
+
+                {
+                    let node = by_id.get_mut(&node_id).unwrap();
+                    node.borrow_mut().children.push(new_node);
+                }
+            }
+        }
+
+        let root = by_id.remove(&ROOT_DIRECTORY_ID).unwrap();
+        Ok(root)
+    }
+
+    pub fn nuke(&self) -> Result<(), anyhow::Error> {
+        self.execute0("DELETE FROM directory_entry")?;
+        self.execute0("DELETE FROM files")?;
         Ok(())
     }
 

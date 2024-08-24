@@ -4,13 +4,16 @@
 - [x] Store files in sqlar
 - [x] Store files in S3 compatible storage
 - [x] Encryption of files
-- Export/import to folder
+- [x] CLI Option to delete all data 
+- [x] Export index to json/yaml
+- [x] Nuke all data
+- Export file to folder
+- Export file to tar
+- Export file to zip
+- Import index from json/yaml
 - Sync between machines (add modification journal, monotonic change id, mark removed files, etc.)
 - Sync with folder, like rsync
 - Encryption of index.db
 - Docker image
-- Nuke functionality
-- Export index to json
-- Import index from json
-- Automatic save to git
-- Warn if incompatible config changes were made
+- Automatic save to git every few minutes if changes are present
+- Warn if incompatible config changes are made

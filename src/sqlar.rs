@@ -55,6 +55,12 @@ impl ObjectStorage for SqlarObjectStorage {
         self.remove_sqlar_file(&name)?;
         Ok(())
     }
+
+    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+        info!("Nuke");
+        self.sql.execute0("DELETE FROM sqlar")?;
+        Ok(())
+    }
 }
 
 impl SqlarObjectStorage {

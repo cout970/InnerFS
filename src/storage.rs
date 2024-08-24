@@ -8,4 +8,5 @@ pub trait Storage {
     fn close(&mut self, file: &mut FileRow) -> Result<bool, anyhow::Error>;
     fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), anyhow::Error>;
     fn cleanup(&mut self, is_in_use: Box<dyn Fn(&ObjInfo) -> Result<bool, anyhow::Error>>) -> Result<(), anyhow::Error>;
+    fn nuke(&mut self) -> Result<(), anyhow::Error>;
 }

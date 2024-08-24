@@ -1,9 +1,11 @@
 use std::rc::Rc;
-
+use anyhow::{anyhow, Error};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_types::region::Region;
+use itertools::Itertools;
 use log::{info};
 use tokio::runtime::{Builder, Runtime};
 
@@ -89,6 +91,68 @@ impl ObjectStorage for S3ObjectStorage {
                 .key(&path)
                 .send().await?;
 
+            Ok(())
+        })
+    }
+
+    fn nuke(&mut self) -> Result<(), Error> {
+        let path = self.config.s3_base_path.trim_end_matches('/').to_string() + "/";
+        let bucket_name = &self.config.s3_bucket;
+        info!("Remove: {:?}", &path);
+
+        // https://github.com/awslabs/aws-sdk-rust/blob/22f71f0e82804f709469f21bdd389f5d56cf8ed1/examples/examples/s3/src/s3-service-lib.rs#L31
+        pub async fn delete_objects(client: &Client, bucket_name: &str, base_path: &str) -> Result<(), Error> {
+            let objects = client.list_objects_v2()
+                .bucket(bucket_name)
+                .prefix(base_path)
+                .send()
+                .await?;
+
+            let mut delete_objects: Vec<ObjectIdentifier> = vec![];
+
+            for obj in objects.contents() {
+                let key = obj.key().unwrap().to_string();
+
+                let obj_id = ObjectIdentifier::builder()
+                    .set_key(Some(key))
+                    .build()
+                    .map_err(Error::from)?;
+
+                delete_objects.push(obj_id);
+            }
+
+            if !delete_objects.is_empty() {
+                client.delete_objects()
+                    .bucket(bucket_name)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(delete_objects))
+                            .build()
+                            .map_err(Error::from)?,
+                    )
+                    .send()
+                    .await?;
+            }
+
+            let objects = client.list_objects_v2()
+                .bucket(bucket_name)
+                .prefix(base_path)
+                .send()
+                .await?;
+
+            if let Some(key_count) = objects.key_count() {
+                if key_count > 0i32 {
+                    let keys = objects.contents().iter().map(|obj| obj.key.as_ref().unwrap().to_string()).collect_vec();
+
+                    return Err(anyhow!("Failed to delete all objects, remaining: {:?}", keys));
+                }
+            }
+
+            Ok(())
+        }
+
+        self.rt.block_on(async {
+            delete_objects(&self.client, &bucket_name, &path).await?;
             Ok(())
         })
     }

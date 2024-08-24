@@ -182,6 +182,10 @@ impl ObjectStorage for EncryptedObjectStorage {
 
         self.fs.remove(&info)
     }
+
+    fn nuke(&mut self) -> Result<(), Error> {
+        self.fs.nuke()
+    }
 }
 
 #[test]

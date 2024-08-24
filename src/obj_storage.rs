@@ -1,6 +1,6 @@
 use crate::sql::FileRow;
 use anyhow::{anyhow, Context};
-use log::{info};
+use log::{error, info};
 use std::fmt::Display;
 use std::fs;
 use std::path::PathBuf;
@@ -21,6 +21,7 @@ pub trait ObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error>;
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error>;
     fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error>;
+    fn nuke(&mut self) -> Result<(), anyhow::Error>;
 }
 
 impl Display for ObjInfo {
@@ -61,6 +62,11 @@ impl ObjectStorage for DebugObjectStorage {
         info!("Remove: {}", name);
         Ok(())
     }
+
+    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+        info!("Nuke");
+        Ok(())
+    }
 }
 
 pub struct FsObjectStorage {
@@ -95,5 +101,33 @@ impl ObjectStorage for FsObjectStorage {
         fs::remove_file(&path).map_err(|e|{
             anyhow!("FS failed to remove file '{:?}': {:?}", path, e)
         })
+    }
+
+    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+        info!("Nuke: {:?}", &self.base_path);
+
+        for entry_res in fs::read_dir(&self.base_path)? {
+            let entry = match entry_res {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("[IGNORED] Failed to read entry: {:?}", e);
+                    continue;
+                }
+            };
+
+            let meta = entry.metadata()?;
+
+            if meta.is_dir() {
+                if let Err(e) = fs::remove_dir_all(entry.path()) {
+                    error!("[IGNORED] Failed to remove '{:?}': {:?}", entry.path(), e);
+                }
+            } else {
+                if let Err(e) = fs::remove_file(entry.path()) {
+                    error!("[IGNORED] Failed to remove '{:?}': {:?}", entry.path(), e);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
