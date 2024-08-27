@@ -17,6 +17,7 @@ pub const FILE_KIND_DIRECTORY: i64 = 1;
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: i64,
+    pub version: i64,
     pub kind: i64,
     pub name: String,
     pub uid: i64,
@@ -40,6 +41,14 @@ pub struct DirectoryEntry {
     pub kind: i64,
 }
 
+#[derive(Debug, Clone)]
+pub enum FileChangeKind {
+    Created,
+    UpdatedMetadata,
+    UpdatedContents,
+    Deleted,
+}
+
 #[allow(dead_code)]
 impl SQL {
     pub fn open(database_file: &str) -> SQL {
@@ -51,10 +60,47 @@ impl SQL {
         SQL { connection }
     }
 
-    pub fn add_file(self: &SQL, file: &FileRow) -> Result<i64, anyhow::Error> {
-        self.execute11(
-            "INSERT INTO files (kind, name, uid, gid, perms, size, sha512, encryption_key, accessed_at, created_at, updated_at) \
-            VALUES (:kind, :name, :uid, :gid, :perms, :size, :sha512, :encryption_key, :accessed_at, :created_at, :updated_at)",
+    pub fn run_migrations(&self) -> Result<(), anyhow::Error> {
+        let sql = "SELECT version FROM migrations ORDER BY id DESC";
+        #[allow(clippy::unnecessary_cast)]
+        let versions = self.get_rows(sql, ([] as [i64; 0]).as_ref(), |stm| {
+            Ok(stm.read::<String, _>("version")?)
+        })?;
+
+        if !versions.contains(&"1.0.0".to_string()) {
+            panic!("Incorrect migrations table, please re-create the database");
+        }
+
+        if !versions.contains(&"1.0.1".to_string()) {
+            // New version column, or ignore error if it already exists
+            let _ = self.connection.execute("ALTER TABLE files ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+
+            // Mark migration as complete
+            self.connection.execute("INSERT INTO migrations (version, created_at) VALUES ('1.0.1', unixepoch('now'))")?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_setting(&self, name: &str) -> Result<Option<String>, anyhow::Error> {
+        self.get_row("SELECT setting_value FROM persistent_settings WHERE setting_name = :name", (":name", name), |row| {
+            Ok(row.read("setting_value")?)
+        })
+    }
+
+    pub fn set_setting(&self, name: &str, value: &str) -> Result<(), anyhow::Error> {
+        self.execute2(
+            "INSERT OR REPLACE INTO persistent_settings (setting_name, setting_value, updated_at) VALUES (:name, :value, unixepoch('now'))",
+            (":name", name),
+            (":value", value),
+        )
+    }
+
+    pub fn add_file(&self, file: &FileRow) -> Result<i64, anyhow::Error> {
+        self.execute12(
+            "INSERT INTO files (version, kind, name, uid, gid, perms, size, sha512, encryption_key, accessed_at, created_at, updated_at) \
+            VALUES (:version, :kind, :name, :uid, :gid, :perms, :size, :sha512, :encryption_key, :accessed_at, :created_at, :updated_at)",
+            (":version", 1),
             (":kind", file.kind),
             (":name", file.name.as_str()),
             (":uid", file.uid),
@@ -72,13 +118,14 @@ impl SQL {
         Ok(id)
     }
 
-    pub fn get_file(self: &SQL, id: i64) -> Result<Option<FileRow>, anyhow::Error> {
+    pub fn get_file(&self, id: i64) -> Result<Option<FileRow>, anyhow::Error> {
         self.get_row(
             "SELECT * FROM files WHERE id = :id",
             (":id", id),
             |row| {
                 Ok(FileRow {
                     id: row.read("id")?,
+                    version: row.read("version")?,
                     kind: row.read("kind")?,
                     name: row.read("name")?,
                     uid: row.read("uid")?,
@@ -94,13 +141,14 @@ impl SQL {
             })
     }
 
-    pub fn get_file_by_sha512(self: &SQL, sha512: &str) -> Result<Option<FileRow>, anyhow::Error> {
+    pub fn get_file_by_sha512(&self, sha512: &str) -> Result<Option<FileRow>, anyhow::Error> {
         self.get_row(
             "SELECT * FROM files WHERE sha512 = :sha512 LIMIT 1",
             (":sha512", sha512),
             |row| {
                 Ok(FileRow {
                     id: row.read("id")?,
+                    version: row.read("version")?,
                     kind: row.read("kind")?,
                     name: row.read("name")?,
                     uid: row.read("uid")?,
@@ -116,7 +164,7 @@ impl SQL {
             })
     }
 
-    pub fn get_file_by_path(self: &SQL, path: &str) -> Result<Option<FileRow>, anyhow::Error> {
+    pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileRow>, anyhow::Error> {
         let buff = PathBuf::from(path);
         let mut current = ROOT_DIRECTORY_ID;
 
@@ -137,9 +185,9 @@ impl SQL {
         self.get_file(current)
     }
 
-    pub fn update_file(self: &SQL, file: &FileRow) -> Result<(), anyhow::Error> {
+    pub fn update_file(&self, file: &FileRow) -> Result<(), anyhow::Error> {
         self.execute12(
-            "UPDATE files SET kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, sha512 = :sha512, encryption_key = :encryption_key, accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at WHERE id = :id",
+            "UPDATE files SET version = version + 1, kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, sha512 = :sha512, encryption_key = :encryption_key, accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at WHERE id = :id",
             (":kind", file.kind),
             (":name", file.name.as_str()),
             (":uid", file.uid),
@@ -156,13 +204,33 @@ impl SQL {
         Ok(())
     }
 
-    pub fn remove_file(self: &SQL, id: i64) -> Result<(), anyhow::Error> {
+    pub fn get_file_version(&self, id: i64) -> Result<Option<i64>, anyhow::Error> {
+        self.get_row("SELECT version FROM files WHERE id = :id", (":id", id), |row| {
+            Ok(row.read::<i64, _>("version")?)
+        })
+    }
+
+    pub fn register_file_change(&self, file: &FileRow, kind: FileChangeKind) -> Result<(), anyhow::Error> {
+        let version = self.get_file_version(file.id)?.unwrap_or_else(|| 1);
+        let sha512 = file.hash();
+
+        self.execute4(
+            "INSERT INTO file_changes (file_id, file_version, kind, file_sha512, changed_at) values (:file_id, :file_version, :kind, :file_sha512, unixepoch('now'))",
+            (":file_id", file.id),
+            (":file_version", version),
+            (":kind", kind.to_i64()),
+            (":file_sha512", sha512.as_str()),
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_file(&self, id: i64) -> Result<(), anyhow::Error> {
         self.execute1("DELETE FROM files WHERE id = :id", (":id", id))?;
         self.execute1("DELETE FROM directory_entry WHERE entry_file_id = :id OR directory_file_id = :id", (":id", id))?;
         Ok(())
     }
 
-    pub fn find_directory_entry(self: &SQL, directory_file_id: i64, name: &str) -> Result<Option<DirectoryEntry>, anyhow::Error> {
+    pub fn find_directory_entry(&self, directory_file_id: i64, name: &str) -> Result<Option<DirectoryEntry>, anyhow::Error> {
         self.get_row(
             "SELECT * FROM directory_entry WHERE directory_file_id = :directory_file_id and name = :name",
             &[(":directory_file_id", directory_file_id.to_string().as_str()), (":name", name)][..],
@@ -177,7 +245,7 @@ impl SQL {
             })
     }
 
-    pub fn find_parent_directory(self: &SQL, file_id: i64) -> Result<Option<i64>, anyhow::Error> {
+    pub fn find_parent_directory(&self, file_id: i64) -> Result<Option<i64>, anyhow::Error> {
         self.get_row(
             "SELECT directory_file_id FROM directory_entry WHERE entry_file_id = :file_id and name <> '.' and name <> '..'",
             &[(":file_id", file_id)][..],
@@ -186,7 +254,7 @@ impl SQL {
             })
     }
 
-    pub fn get_file_path(self: &SQL, file_id: i64) -> Result<String, anyhow::Error> {
+    pub fn get_file_path(&self, file_id: i64) -> Result<String, anyhow::Error> {
         let mut path_components = vec![];
         let mut current_file_id = file_id;
 
@@ -220,7 +288,7 @@ impl SQL {
         Ok(path)
     }
 
-    pub fn get_directory_entries(self: &SQL, directory_file_id: i64, limit: i64, offset: i64) -> Result<Vec<DirectoryEntry>, anyhow::Error> {
+    pub fn get_directory_entries(&self, directory_file_id: i64, limit: i64, offset: i64) -> Result<Vec<DirectoryEntry>, anyhow::Error> {
         let query = "\
             SELECT * \
             FROM directory_entry \
@@ -246,7 +314,7 @@ impl SQL {
             })
     }
 
-    pub fn update_directory_entry(self: &SQL, entry: &DirectoryEntry) -> Result<(), anyhow::Error> {
+    pub fn update_directory_entry(&self, entry: &DirectoryEntry) -> Result<(), anyhow::Error> {
         self.execute5(
             "UPDATE directory_entry SET directory_file_id = :directory_file_id, entry_file_id = :entry_file_id, name = :name, kind = :kind WHERE id = :id",
             (":directory_file_id", entry.directory_file_id),
@@ -255,10 +323,14 @@ impl SQL {
             (":kind", entry.kind),
             (":id", entry.id),
         )?;
+        self.execute1(
+            "UPDATE files SET version = version + 1 WHERE id = :id",
+            (":directory_file_id", entry.directory_file_id),
+        )?;
         Ok(())
     }
 
-    pub fn add_directory_entry(self: &SQL, entry: &DirectoryEntry) -> Result<i64, anyhow::Error> {
+    pub fn add_directory_entry(&self, entry: &DirectoryEntry) -> Result<i64, anyhow::Error> {
         self.execute4(
             "INSERT INTO directory_entry (directory_file_id, entry_file_id, name, kind) \
             VALUES (:directory_file_id, :entry_file_id, :name, :kind)",
@@ -267,19 +339,24 @@ impl SQL {
             (":name", entry.name.as_str()),
             (":kind", entry.kind),
         )?;
-
         let id = self.get_last_inserted_row_id()?;
+
+        self.execute1(
+            "UPDATE files SET version = version + 1 WHERE id = :id",
+            (":id", entry.directory_file_id),
+        )?;
+
         Ok(id)
     }
 
-    pub fn get_last_inserted_row_id(self: &SQL) -> Result<i64, anyhow::Error> {
+    pub fn get_last_inserted_row_id(&self) -> Result<i64, anyhow::Error> {
         let mut stm2 = self.connection.prepare("SELECT last_insert_rowid()")?;
         stm2.next()?;
         let id: i64 = stm2.read::<i64, _>(0)?;
         Ok(id)
     }
 
-    pub fn file_set_access_time(self: &SQL, id: i64, accessed_at: i64) -> Result<(), anyhow::Error> {
+    pub fn file_set_access_time(&self, id: i64, accessed_at: i64) -> Result<(), anyhow::Error> {
         self.execute2(
             "UPDATE files SET accessed_at = :accessed_at WHERE id = :id",
             (":accessed_at", accessed_at),
@@ -390,13 +467,13 @@ impl SQL {
         Ok(result)
     }
 
-    pub fn execute0(self: &SQL, query: &str) -> Result<(), anyhow::Error> {
+    pub fn execute0(&self, query: &str) -> Result<(), anyhow::Error> {
         let mut statement = self.connection.prepare(query)?;
         statement.next()?;
         Ok(())
     }
 
-    pub fn execute1<B0>(self: &SQL, query: &str, b0: B0) -> Result<(), anyhow::Error>
+    pub fn execute1<B0>(&self, query: &str, b0: B0) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
     {
@@ -406,7 +483,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute2<B0, B1>(self: &SQL, query: &str, b0: B0, b1: B1) -> Result<(), anyhow::Error>
+    pub fn execute2<B0, B1>(&self, query: &str, b0: B0, b1: B1) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -418,7 +495,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute3<B0, B1, B2>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2) -> Result<(), anyhow::Error>
+    pub fn execute3<B0, B1, B2>(&self, query: &str, b0: B0, b1: B1, b2: B2) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -432,7 +509,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute4<B0, B1, B2, B3>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3) -> Result<(), anyhow::Error>
+    pub fn execute4<B0, B1, B2, B3>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -448,7 +525,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute5<B0, B1, B2, B3, B4>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4) -> Result<(), anyhow::Error>
+    pub fn execute5<B0, B1, B2, B3, B4>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -466,7 +543,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute6<B0, B1, B2, B3, B4, B5>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5) -> Result<(), anyhow::Error>
+    pub fn execute6<B0, B1, B2, B3, B4, B5>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -486,7 +563,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute7<B0, B1, B2, B3, B4, B5, B6>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6) -> Result<(), anyhow::Error>
+    pub fn execute7<B0, B1, B2, B3, B4, B5, B6>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -508,7 +585,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute8<B0, B1, B2, B3, B4, B5, B6, B7>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7) -> Result<(), anyhow::Error>
+    pub fn execute8<B0, B1, B2, B3, B4, B5, B6, B7>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -532,7 +609,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute9<B0, B1, B2, B3, B4, B5, B6, B7, B8>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8) -> Result<(), anyhow::Error>
+    pub fn execute9<B0, B1, B2, B3, B4, B5, B6, B7, B8>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -558,7 +635,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute10<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9) -> Result<(), anyhow::Error>
+    pub fn execute10<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -586,7 +663,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute11<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10) -> Result<(), anyhow::Error>
+    pub fn execute11<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -616,7 +693,7 @@ impl SQL {
         Ok(())
     }
 
-    pub fn execute12<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11>(self: &SQL, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11) -> Result<(), anyhow::Error>
+    pub fn execute12<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11) -> Result<(), anyhow::Error>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -648,7 +725,155 @@ impl SQL {
         Ok(())
     }
 
-    pub fn transaction<R>(self: &SQL, func: impl FnOnce() -> Result<R, anyhow::Error>) -> Result<R, anyhow::Error> {
+    pub fn execute13<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12) -> Result<(), anyhow::Error>
+    where
+        B0: Bindable + Clone,
+        B1: Bindable + Clone,
+        B2: Bindable + Clone,
+        B3: Bindable + Clone,
+        B4: Bindable + Clone,
+        B5: Bindable + Clone,
+        B6: Bindable + Clone,
+        B7: Bindable + Clone,
+        B8: Bindable + Clone,
+        B9: Bindable + Clone,
+        B10: Bindable + Clone,
+        B11: Bindable + Clone,
+        B12: Bindable + Clone,
+    {
+        let mut statement = self.connection.prepare(query)?;
+        statement.bind(b0)?;
+        statement.bind(b1)?;
+        statement.bind(b2)?;
+        statement.bind(b3)?;
+        statement.bind(b4)?;
+        statement.bind(b5)?;
+        statement.bind(b6)?;
+        statement.bind(b7)?;
+        statement.bind(b8)?;
+        statement.bind(b9)?;
+        statement.bind(b10)?;
+        statement.bind(b11)?;
+        statement.bind(b12)?;
+        statement.next()?;
+        Ok(())
+    }
+
+    pub fn execute14<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12, b13: B13) -> Result<(), anyhow::Error>
+    where
+        B0: Bindable + Clone,
+        B1: Bindable + Clone,
+        B2: Bindable + Clone,
+        B3: Bindable + Clone,
+        B4: Bindable + Clone,
+        B5: Bindable + Clone,
+        B6: Bindable + Clone,
+        B7: Bindable + Clone,
+        B8: Bindable + Clone,
+        B9: Bindable + Clone,
+        B10: Bindable + Clone,
+        B11: Bindable + Clone,
+        B12: Bindable + Clone,
+        B13: Bindable + Clone,
+    {
+        let mut statement = self.connection.prepare(query)?;
+        statement.bind(b0)?;
+        statement.bind(b1)?;
+        statement.bind(b2)?;
+        statement.bind(b3)?;
+        statement.bind(b4)?;
+        statement.bind(b5)?;
+        statement.bind(b6)?;
+        statement.bind(b7)?;
+        statement.bind(b8)?;
+        statement.bind(b9)?;
+        statement.bind(b10)?;
+        statement.bind(b11)?;
+        statement.bind(b12)?;
+        statement.bind(b13)?;
+        statement.next()?;
+        Ok(())
+    }
+
+    pub fn execute15<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12, b13: B13, b14: B14) -> Result<(), anyhow::Error>
+    where
+        B0: Bindable + Clone,
+        B1: Bindable + Clone,
+        B2: Bindable + Clone,
+        B3: Bindable + Clone,
+        B4: Bindable + Clone,
+        B5: Bindable + Clone,
+        B6: Bindable + Clone,
+        B7: Bindable + Clone,
+        B8: Bindable + Clone,
+        B9: Bindable + Clone,
+        B10: Bindable + Clone,
+        B11: Bindable + Clone,
+        B12: Bindable + Clone,
+        B13: Bindable + Clone,
+        B14: Bindable + Clone,
+    {
+        let mut statement = self.connection.prepare(query)?;
+        statement.bind(b0)?;
+        statement.bind(b1)?;
+        statement.bind(b2)?;
+        statement.bind(b3)?;
+        statement.bind(b4)?;
+        statement.bind(b5)?;
+        statement.bind(b6)?;
+        statement.bind(b7)?;
+        statement.bind(b8)?;
+        statement.bind(b9)?;
+        statement.bind(b10)?;
+        statement.bind(b11)?;
+        statement.bind(b12)?;
+        statement.bind(b13)?;
+        statement.bind(b14)?;
+        statement.next()?;
+        Ok(())
+    }
+
+    pub fn execute16<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14, B15>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12, b13: B13, b14: B14, b15: B15) -> Result<(), anyhow::Error>
+    where
+        B0: Bindable + Clone,
+        B1: Bindable + Clone,
+        B2: Bindable + Clone,
+        B3: Bindable + Clone,
+        B4: Bindable + Clone,
+        B5: Bindable + Clone,
+        B6: Bindable + Clone,
+        B7: Bindable + Clone,
+        B8: Bindable + Clone,
+        B9: Bindable + Clone,
+        B10: Bindable + Clone,
+        B11: Bindable + Clone,
+        B12: Bindable + Clone,
+        B13: Bindable + Clone,
+        B14: Bindable + Clone,
+        B15: Bindable + Clone,
+    {
+        let mut statement = self.connection.prepare(query)?;
+        statement.bind(b0)?;
+        statement.bind(b1)?;
+        statement.bind(b2)?;
+        statement.bind(b3)?;
+        statement.bind(b4)?;
+        statement.bind(b5)?;
+        statement.bind(b6)?;
+        statement.bind(b7)?;
+        statement.bind(b8)?;
+        statement.bind(b9)?;
+        statement.bind(b10)?;
+        statement.bind(b11)?;
+        statement.bind(b12)?;
+        statement.bind(b13)?;
+        statement.bind(b14)?;
+        statement.bind(b15)?;
+        statement.next()?;
+        Ok(())
+    }
+
+    pub fn transaction<R>(&self, func: impl FnOnce() -> Result<R, anyhow::Error>) -> Result<R, anyhow::Error> {
         self.connection.execute("BEGIN TRANSACTION")?;
         let res = func();
         if res.is_ok() {
@@ -657,5 +882,34 @@ impl SQL {
             self.connection.execute("ROLLBACK")?;
         }
         res
+    }
+}
+
+impl FileRow {
+    pub fn hash(&self) -> String {
+        let mut hash = hmac_sha512::Hash::new();
+        hash.update(&self.id.to_string());
+        hash.update(&self.kind.to_string());
+        hash.update(&self.name);
+        hash.update(&self.uid.to_string());
+        hash.update(&self.gid.to_string());
+        hash.update(&self.perms.to_string());
+        hash.update(&self.size.to_string());
+        hash.update(&self.sha512);
+        hash.update(&self.encryption_key);
+        hash.update(&self.created_at.to_string());
+        hash.update(&self.updated_at.to_string());
+        hex::encode(hash.finalize())
+    }
+}
+
+impl FileChangeKind {
+    pub fn to_i64(&self) -> i64 {
+        match self {
+            FileChangeKind::Created => 0,
+            FileChangeKind::UpdatedMetadata => 1,
+            FileChangeKind::UpdatedContents => 2,
+            FileChangeKind::Deleted => 3,
+        }
     }
 }

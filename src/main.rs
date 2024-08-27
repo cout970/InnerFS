@@ -1,23 +1,23 @@
-use fs::File;
-use std::fmt::{Display, Formatter};
-use crate::config::{read_config, StorageOption};
+use crate::config::{read_config, Config, StorageOption};
 use crate::encryption::EncryptedObjectStorage;
 use crate::obj_storage::{FsObjectStorage, ObjectStorage};
 use crate::proxy_fs::ProxyFileSystem;
 use crate::s3::S3ObjectStorage;
-use crate::sql::{SQL};
+use crate::sql::SQL;
 use crate::sqlar::SqlarObjectStorage;
 use crate::storage_interface::StorageInterface;
+use anyhow::{anyhow, Context};
 use env_logger::Env;
+use fs::File;
 use log::{error, info, warn};
-use std::{env, fs};
 use std::ffi::OsStr;
+use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::Context;
+use std::{env, fs};
 
 mod config;
 mod sql;
@@ -31,12 +31,14 @@ mod s3;
 mod encryption;
 mod fs_tree;
 
+use crate::fs_tree::{FsTree, FsTreeKind};
 use crate::sql_fs::SqlFileSystem;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::{write::GzEncoder, Compression};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
-use crate::fs_tree::{FsTree, FsTreeKind};
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Utility to mount a shadow filesystem, supports encryption and multiple storage backends: S3, Sqlar and FileSystem
 #[derive(Parser)]
@@ -134,11 +136,17 @@ fn main() {
         return;
     }
 
-    info!("Starting");
+    info!("Starting v{}", VERSION);
     let config = read_config(&config_path).expect("Unable to read config");
 
     info!("Config loaded");
     let sql = Rc::new(SQL::open(&config.database_file));
+
+    // Run migrations
+    sql.run_migrations().expect("Unable to run migrations");
+
+    // Check if the config file has changed in incompatible ways
+    check_config_changes(config.clone(), sql.clone()).unwrap();
 
     info!("Database opened");
     // Select the appropriate storage backend
@@ -196,7 +204,7 @@ fn mount(fs: SqlFileSystem) {
     }
 
     info!("Mounting filesystem at {}", &mount_point);
-    fuse::mount(proxy, &mount_point, &[]).expect("Unable to mount filesystem");
+    fuse::mount(proxy, &mount_point, &[OsStr::new("noempty")]).expect("Unable to mount filesystem");
 
     info!("Folder was unmounted successfully, exiting");
 }
@@ -305,6 +313,92 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
     };
 
     info!("Files exported successfully");
+    Ok(())
+}
+
+pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyhow::Error> {
+    // Changing storage_option will make all the files not available
+    let storage_option = config.storage_backend.to_string();
+    {
+        let setting = sql.get_setting("storage_option")?;
+        if let Some(setting) = setting {
+            if setting != storage_option {
+                error!("Storage option changed from {} to {}, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem", setting, storage_option);
+                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
+                if !ask_for_confirmation() {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+        sql.set_setting("storage_option", &storage_option)?;
+    }
+
+    // Changing encryption_key will make every file not readable
+    let encryption_key = hex::encode(hmac_sha512::Hash::hash(&config.encryption_key));
+    {
+        let setting = sql.get_setting("encryption_key_sha512")?;
+
+        if let Some(setting) = setting {
+            if setting != encryption_key {
+                error!("Encryption key changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
+                if !ask_for_confirmation() {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+        sql.set_setting("encryption_key_sha512", &encryption_key)?;
+    }
+    // Changing use_hash_as_filename will cause in a mismatch between previous and new filenames
+    let use_hash_as_filename = config.use_hash_as_filename.to_string();
+    {
+        let setting = sql.get_setting("use_hash_as_filename")?;
+        if let Some(setting) = setting {
+            if setting != use_hash_as_filename {
+                error!("use_hash_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
+                if !ask_for_confirmation() {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+        sql.set_setting("use_hash_as_filename", &use_hash_as_filename)?;
+    }
+
+    // s3_bucket/s3_region/s3_endpoint_url
+    if config.storage_backend == StorageOption::S3 {
+        let bucket = sql.get_setting("s3_bucket")?.unwrap_or_else(|| "".to_string());
+        let region = sql.get_setting("s3_region")?.unwrap_or_else(|| "".to_string());
+        let endpoint_url = sql.get_setting("s3_endpoint_url")?.unwrap_or_else(|| "".to_string());
+
+        if bucket != config.s3_bucket || region != config.s3_region || endpoint_url != config.s3_endpoint_url {
+            error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
+            info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
+            if !ask_for_confirmation() {
+                return Err(anyhow!("Operation cancelled"));
+            }
+        }
+
+        sql.set_setting("s3_bucket", &bucket)?;
+        sql.set_setting("s3_region", &region)?;
+        sql.set_setting("s3_endpoint_url", &endpoint_url)?;
+    }
+
+    // Changing blob_storage will make all the files not available
+    if config.storage_backend == StorageOption::FileSystem {
+        let setting = sql.get_setting("blob_storage")?;
+        if let Some(setting) = setting {
+            if setting != config.blob_storage {
+                error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
+                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
+                if !ask_for_confirmation() {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+        sql.set_setting("blob_storage", &config.blob_storage)?;
+    }
+
     Ok(())
 }
 

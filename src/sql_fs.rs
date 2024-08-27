@@ -1,11 +1,10 @@
-
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 
 use crate::config::Config;
 use crate::current_timestamp;
-use crate::sql::{DirectoryEntry, FileRow, SQL};
+use crate::sql::{DirectoryEntry, FileChangeKind, FileRow, SQL};
 use crate::storage::Storage;
 use anyhow::{anyhow, Context};
 use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP, O_RDONLY};
@@ -36,6 +35,10 @@ impl SqlFileSystem {
 
         if modified {
             self.sql.update_file(&file)?;
+
+            if self.config.store_file_change_history {
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+            }
         } else if self.config.update_access_time {
             self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
@@ -56,6 +59,10 @@ impl SqlFileSystem {
         let modified = self.storage.close(&mut file)?;
         if modified {
             self.sql.update_file(&file)?;
+
+            if self.config.store_file_change_history {
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
+            }
         } else if self.config.update_access_time {
             self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
@@ -120,6 +127,10 @@ impl SqlFileSystem {
             }
 
             this.sql.update_file(&file)?;
+
+            if this.config.store_file_change_history {
+                this.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+            }
             Ok(file)
         })
     }
@@ -129,13 +140,13 @@ impl SqlFileSystem {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
 
-        self.get_file_or_err(parent as i64)?;
+        let parent_directory = self.get_file_or_err(parent as i64)?;
 
         self.transaction(|this| {
             let now = current_timestamp();
-
-            let id = this.sql.add_file(&FileRow {
+            let mut file = FileRow {
                 id: 0,
+                version: 1,
                 kind: 1,
                 name: name.to_string(),
                 uid: uid as i64,
@@ -147,7 +158,10 @@ impl SqlFileSystem {
                 accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
-            })?;
+            };
+
+            let id = this.sql.add_file(&file)?;
+            file.id = id;
 
             // child entry to itself
             this.sql.add_directory_entry(&DirectoryEntry {
@@ -180,7 +194,11 @@ impl SqlFileSystem {
                 this.sql.file_set_access_time(parent as i64, now)?;
             }
 
-            let file = this.get_file_or_err(id)?;
+            if this.config.store_file_change_history {
+                this.sql.register_file_change(&file, FileChangeKind::Created)?;
+                this.sql.register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
+            }
+
             Ok(file)
         })
     }
@@ -190,13 +208,13 @@ impl SqlFileSystem {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
 
-        let dir_file = self.get_file_or_err(parent)?;
+        let parent_directory = self.get_file_or_err(parent)?;
 
-        if dir_file.kind != 1 {
+        if parent_directory.kind != 1 {
             return error(ENOTDIR, anyhow!("Not a directory: {}", parent));
         }
 
-        let existing_entry = self.sql.find_directory_entry(dir_file.id, name)?;
+        let existing_entry = self.sql.find_directory_entry(parent_directory.id, name)?;
 
         if existing_entry.is_some() {
             return error(EEXIST, anyhow!("File already exists: {}", name));
@@ -204,9 +222,9 @@ impl SqlFileSystem {
 
         let id = self.transaction(|this| {
             let now = current_timestamp();
-
-            let id = this.sql.add_file(&FileRow {
+            let mut file = FileRow {
                 id: 0,
+                version: 1,
                 kind: 0,
                 name: name.to_string(),
                 uid: uid as i64,
@@ -218,7 +236,10 @@ impl SqlFileSystem {
                 accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
-            })?;
+            };
+
+            let id = this.sql.add_file(&file)?;
+            file.id = id;
 
             // parent entry to child
             this.sql.add_directory_entry(&DirectoryEntry {
@@ -231,6 +252,11 @@ impl SqlFileSystem {
 
             if this.config.update_access_time {
                 this.sql.file_set_access_time(parent, now)?;
+            }
+
+            if this.config.store_file_change_history {
+                this.sql.register_file_change(&file, FileChangeKind::Created)?;
+                this.sql.register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
             }
             Ok(id)
         })?;
@@ -250,9 +276,15 @@ impl SqlFileSystem {
             return error(EISDIR, anyhow!("Cannot unlink directory"));
         }
 
+        let parent_directory = self.get_file_or_err(parent)?;
         let full_path = self.sql.get_file_path(file.id)?;
         self.storage.remove(&file, &full_path)?;
         self.sql.remove_file(dir_entry.entry_file_id)?;
+
+        if self.config.store_file_change_history {
+            self.sql.register_file_change(&file, FileChangeKind::Deleted)?;
+            self.sql.register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
+        }
         self.cleanup()?;
         Ok(())
     }
@@ -264,6 +296,7 @@ impl SqlFileSystem {
 
         let dir_entry = self.find_directory_entry_or_err(parent, name)?;
         let file = self.get_file_or_err(dir_entry.entry_file_id)?;
+        let parent_directory = self.get_file_or_err(dir_entry.directory_file_id)?;
 
         // File is not a directory
         if file.kind != 1 {
@@ -279,6 +312,11 @@ impl SqlFileSystem {
 
         self.sql.remove_file(dir_entry.entry_file_id)?;
         self.cleanup()?;
+
+        if self.config.store_file_change_history {
+            self.sql.register_file_change(&file, FileChangeKind::Deleted)?;
+            self.sql.register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
+        }
         Ok(())
     }
 
@@ -299,13 +337,20 @@ impl SqlFileSystem {
         }
 
         self.transaction(|this| {
+            let parent_directory = this.get_file_or_err(parent)?;
             let mut entry = entry;
+
             entry.name = new_name.to_string();
             this.sql.update_directory_entry(&entry)?;
 
             let mut file = this.get_file_or_err(entry.entry_file_id)?;
             file.name = new_name.to_string();
             this.sql.update_file(&file)?;
+
+            if this.config.store_file_change_history {
+                this.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                this.sql.register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
+            }
 
             Ok(())
         })
@@ -321,6 +366,10 @@ impl SqlFileSystem {
 
         if modified {
             self.sql.update_file(&file)?;
+
+            if self.config.store_file_change_history {
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+            }
         } else if self.config.update_access_time {
             self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
@@ -350,6 +399,10 @@ impl SqlFileSystem {
 
         if modified {
             self.sql.update_file(&file)?;
+
+            if self.config.store_file_change_history {
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
+            }
         }
 
         self.cleanup()?;

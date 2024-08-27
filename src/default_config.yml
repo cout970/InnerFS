@@ -48,4 +48,8 @@ use_hash_as_filename: false
 # It is recommended to keep this disabled to improve performance, if you don't need this feature
 update_access_time: false
 
+# Keep file change history
+# To slightly improve performance, you can disable this feature
+store_file_change_history: true
+
 ########################################################################################################################

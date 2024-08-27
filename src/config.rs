@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::fs;
 use std::path::{PathBuf};
 use std::rc::Rc;
@@ -19,6 +20,7 @@ struct YamlConfig {
     encryption_key: Option<String>,
     update_access_time: Option<bool>,
     use_hash_as_filename: Option<bool>,
+    store_file_change_history: Option<bool>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -43,6 +45,7 @@ pub struct Config {
     pub encryption_key: String,
     pub update_access_time: bool,
     pub use_hash_as_filename: bool,
+    pub store_file_change_history: bool,
 }
 
 pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
@@ -78,8 +81,9 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
         s3_access_key: config.s3_access_key.unwrap_or("".to_string()),
         s3_secret_key: config.s3_secret_key.unwrap_or("".to_string()),
         encryption_key: config.encryption_key.unwrap_or("".to_string()),
-        update_access_time: config.update_access_time.unwrap_or(true),
-        use_hash_as_filename: config.use_hash_as_filename.unwrap_or(true),
+        update_access_time: config.update_access_time.unwrap_or(false),
+        use_hash_as_filename: config.use_hash_as_filename.unwrap_or(false),
+        store_file_change_history: config.store_file_change_history.unwrap_or(true),
     };
 
     let mut errors = vec![];
@@ -110,4 +114,34 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, anyhow::Error> {
     }
 
     Ok(Rc::new(cfg))
+}
+
+impl Display for StorageOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageOption::FileSystem => write!(f, "filesystem"),
+            StorageOption::Sqlar => write!(f, "sqlar"),
+            StorageOption::S3 => write!(f, "s3"),
+        }
+    }
+}
+
+impl Display for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Config {{\n")?;
+        write!(f, "  database_file: {}\n", self.database_file)?;
+        write!(f, "  mount_point: {}\n", self.mount_point)?;
+        write!(f, "  blob_storage: {}\n", self.blob_storage)?;
+        write!(f, "  storage_backend: {}\n", self.storage_backend)?;
+        write!(f, "  s3_endpoint_url: {}\n", self.s3_endpoint_url)?;
+        write!(f, "  s3_region: {}\n", self.s3_region)?;
+        write!(f, "  s3_bucket: {}\n", self.s3_bucket)?;
+        write!(f, "  s3_base_path: {}\n", self.s3_base_path)?;
+        write!(f, "  s3_access_key: {}\n", self.s3_access_key)?;
+        write!(f, "  s3_secret_key: {}\n", self.s3_secret_key)?;
+        write!(f, "  encryption_key: {}\n", self.encryption_key)?;
+        write!(f, "  update_access_time: {}\n", self.update_access_time)?;
+        write!(f, "  use_hash_as_filename: {}\n", self.use_hash_as_filename)?;
+        write!(f, "}}")
+    }
 }
