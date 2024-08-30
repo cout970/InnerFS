@@ -8,6 +8,7 @@ use crate::sql::{DirectoryEntry, FileChangeKind, FileRow, SQL};
 use crate::storage::Storage;
 use anyhow::{anyhow, Context};
 use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EOPNOTSUPP, O_RDONLY};
+use crate::obj_storage::UniquenessTest;
 
 pub struct SqlFileSystem {
     pub sql: Rc<SQL>,
@@ -421,18 +422,19 @@ impl SqlFileSystem {
 
     pub fn cleanup(&mut self) -> Result<(), SqlFileSystemError> {
         let sql = self.sql.clone();
-        let config = self.config.clone();
-        self.storage.cleanup(Box::new(move |info| {
-            // If file is encrypted, we cannot apply content deduplication
-            if !info.encryption_key.is_empty() {
-                return Ok(false);
-            }
-            let file = if config.use_hash_as_filename {
-                sql.get_file_by_sha512(&info.sha512)?
-            } else {
-                sql.get_file_by_path(&info.full_path)?
+        self.storage.cleanup(Box::new(move |info, test| {
+            let exists = match test {
+                UniquenessTest::Path => {
+                    sql.get_file_by_path(&info.full_path)?.is_some()
+                }
+                UniquenessTest::Sha512 => {
+                    sql.get_file_by_sha512(&info.sha512)?.is_some()
+                }
+                UniquenessTest::AlwaysUnique => {
+                    false
+                }
             };
-            Ok(file.is_some())
+            Ok(exists)
         }))?;
         Ok(())
     }

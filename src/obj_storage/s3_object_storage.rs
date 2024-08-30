@@ -9,17 +9,17 @@ use itertools::Itertools;
 use log::{info};
 use tokio::runtime::{Builder, Runtime};
 
-use crate::config::Config;
-use crate::obj_storage::{ObjectStorage, ObjInfo};
+use crate::config::{StorageConfig};
+use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
 
 pub struct S3ObjectStorage {
-    pub config: Rc<Config>,
+    pub config: Rc<StorageConfig>,
     pub client: Client,
     pub rt: Runtime,
 }
 
 impl S3ObjectStorage {
-    pub fn new(config: Rc<Config>) -> Self {
+    pub fn new(config: Rc<StorageConfig>) -> Self {
         let rt = Builder::new_current_thread()
             .enable_time()
             .enable_io()
@@ -40,12 +40,13 @@ impl S3ObjectStorage {
     }
 
     pub fn path(&self, info: &ObjInfo) -> String {
-        format!("{}/{}", self.config.s3_base_path.trim_matches('/'), &info.full_path.trim_start_matches('/'))
+        let path = self.config.path_of(&info);
+        format!("{}/{}", self.config.s3_base_path.trim_matches('/'), &path)
     }
 }
 
 impl ObjectStorage for S3ObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
+    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
         info!("Get: {:?}", &path);
@@ -62,7 +63,7 @@ impl ObjectStorage for S3ObjectStorage {
         })
     }
 
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
+    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
         info!("Create: {:?}", &path);
@@ -79,7 +80,7 @@ impl ObjectStorage for S3ObjectStorage {
         })
     }
 
-    fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error> {
+    fn remove(&mut self, info: &ObjInfo) -> Result<(), Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
         info!("Remove: {:?}", &path);
@@ -93,6 +94,14 @@ impl ObjectStorage for S3ObjectStorage {
 
             Ok(())
         })
+    }
+
+    fn get_uniqueness_test(&self) -> UniquenessTest {
+        if self.config.use_hash_as_filename {
+            UniquenessTest::Sha512
+        } else {
+            UniquenessTest::Path
+        }
     }
 
     fn nuke(&mut self) -> Result<(), Error> {

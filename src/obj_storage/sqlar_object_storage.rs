@@ -1,10 +1,12 @@
 use std::rc::Rc;
 use log::{info};
-use crate::obj_storage::{ObjectStorage, ObjInfo};
+use crate::config::StorageConfig;
+use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
 use crate::sql::SQL;
 
 pub struct SqlarObjectStorage {
     pub sql: Rc<SQL>,
+    pub config: Rc<StorageConfig>,
 }
 
 // https://sqlite.org/sqlar.html
@@ -27,7 +29,7 @@ pub struct SqlarFile {
 impl ObjectStorage for SqlarObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
         info!("Get: {}", info);
-        let name = info.full_path.clone();
+        let name = self.path(&info);
         let file = self.get_sqlar_file(&name)?;
         if file.is_none() {
             return Err(anyhow::anyhow!("File not found ({})", info.name));
@@ -37,7 +39,7 @@ impl ObjectStorage for SqlarObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
         info!("Create: {}", info);
-        let name = info.full_path.clone();
+        let name = self.path(&info);
         let file = SqlarFile {
             name: name.clone(),
             mode: info.mode as i64,
@@ -51,7 +53,7 @@ impl ObjectStorage for SqlarObjectStorage {
 
     fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error> {
         info!("Remove: {}", info);
-        let name = info.full_path.clone();
+        let name = self.path(&info);
         self.remove_sqlar_file(&name)?;
         Ok(())
     }
@@ -60,6 +62,14 @@ impl ObjectStorage for SqlarObjectStorage {
         info!("Nuke");
         self.sql.execute0("DELETE FROM sqlar")?;
         Ok(())
+    }
+
+    fn get_uniqueness_test(&self) -> UniquenessTest {
+        if self.config.use_hash_as_filename {
+            UniquenessTest::Sha512
+        } else {
+            UniquenessTest::Path
+        }
     }
 }
 
@@ -94,5 +104,9 @@ impl SqlarObjectStorage {
     pub fn remove_sqlar_file(&mut self, name: &str) -> Result<(), anyhow::Error> {
         self.sql.execute1("DELETE FROM sqlar WHERE name = :name", (":name", name))?;
         Ok(())
+    }
+
+    pub fn path(&self, info: &ObjInfo) -> String {
+        self.config.path_of(&info)
     }
 }

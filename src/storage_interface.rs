@@ -1,16 +1,13 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use anyhow::anyhow;
-use crate::config::Config;
 use crate::current_timestamp;
-use crate::obj_storage::{ObjectStorage, ObjInfo};
+use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
 use crate::sql::FileRow;
 use crate::storage::Storage;
 
 pub struct StorageInterface {
     pub obj_storage: Box<dyn ObjectStorage>,
-    pub config: Rc<Config>,
     pub cache: HashMap<i64, StorageInterfaceCache>,
     pub pending_remove: HashSet<ObjInfo>,
 }
@@ -24,20 +21,11 @@ pub struct StorageInterfaceCache {
 }
 
 impl StorageInterface {
-    pub fn new(config: Rc<Config>, obj_storage: Box<dyn ObjectStorage>) -> Self {
+    pub fn new(obj_storage: Box<dyn ObjectStorage>) -> Self {
         Self {
             obj_storage,
-            config,
             cache: HashMap::new(),
             pending_remove: HashSet::new(),
-        }
-    }
-
-    pub fn path(config: &Config, file: &FileRow, full_path: &str) -> String {
-        if config.use_hash_as_filename {
-            if file.sha512.is_empty() { "null".to_string() } else { format!("{}.dat", &file.sha512[..32]) }
-        } else {
-            full_path.trim_start_matches('/').to_string()
         }
     }
 }
@@ -70,7 +58,7 @@ impl Storage for StorageInterface {
 
         if !row.retrieved {
             let content = if !file.sha512.is_empty() {
-                let info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
+                let info = ObjInfo::new(file, &row.full_path);
                 self.obj_storage.get(&info)?
             } else {
                 vec![]
@@ -134,12 +122,12 @@ impl Storage for StorageInterface {
 
                 // Remove old object
                 if !file.sha512.is_empty() && file.sha512 != sha512 {
-                    let info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
+                    let info = ObjInfo::new(file, &row.full_path);
                     self.pending_remove.insert(info);
                 }
 
                 file.sha512 = sha512;
-                let mut info = ObjInfo::new(file, &Self::path(&self.config, file, &row.full_path));
+                let mut info = ObjInfo::new(file, &row.full_path);
 
                 // Store new object
                 self.obj_storage.put(&mut info, &row.content)?;
@@ -157,14 +145,16 @@ impl Storage for StorageInterface {
 
     fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), anyhow::Error> {
         if !file.sha512.is_empty() {
-            self.pending_remove.insert(ObjInfo::new(file, &Self::path(&self.config, file, full_path)));
+            self.pending_remove.insert(ObjInfo::new(file, full_path));
         }
         Ok(())
     }
 
-    fn cleanup(&mut self, is_in_use: Box<dyn Fn(&ObjInfo) -> Result<bool, anyhow::Error>>) -> Result<(), anyhow::Error> {
+    fn cleanup(&mut self, is_in_use: Box<dyn Fn(&ObjInfo, UniquenessTest) -> Result<bool, anyhow::Error>>) -> Result<(), anyhow::Error> {
+        let test = self.obj_storage.get_uniqueness_test();
+
         for info in &self.pending_remove {
-            let in_use = (&is_in_use)(info)?;
+            let in_use = (&is_in_use)(info, test)?;
 
             if !in_use {
                 self.obj_storage.remove(info)?;

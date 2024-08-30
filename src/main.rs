@@ -1,11 +1,7 @@
-use crate::config::{read_config, Config, StorageOption};
-use crate::encryption::EncryptedObjectStorage;
-use crate::obj_storage::{FsObjectStorage, ObjectStorage};
+use crate::config::{read_config, StorageConfig, StorageOption};
+use crate::obj_storage::{create_object_storage, ObjectStorage};
 use crate::proxy_fs::ProxyFileSystem;
-use crate::s3::S3ObjectStorage;
 use crate::sql::SQL;
-use crate::sqlar::SqlarObjectStorage;
-use crate::storage_interface::StorageInterface;
 use anyhow::{anyhow, Context};
 use env_logger::Env;
 use fs::File;
@@ -26,17 +22,16 @@ mod sql_fs;
 mod storage;
 mod obj_storage;
 mod storage_interface;
-mod sqlar;
-mod s3;
-mod encryption;
 mod fs_tree;
 
 use crate::fs_tree::{FsTree, FsTreeKind};
 use crate::sql_fs::SqlFileSystem;
+use crate::storage_interface::StorageInterface;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::{write::GzEncoder, Compression};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
+use crate::obj_storage::replicated_object_storage::ReplicatedObjectStorage;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -146,33 +141,33 @@ fn main() {
     sql.run_migrations().expect("Unable to run migrations");
 
     // Check if the config file has changed in incompatible ways
-    check_config_changes(config.clone(), sql.clone()).unwrap();
+    check_config_changes("primary", config.primary.clone(), sql.clone()).unwrap();
 
     info!("Database opened");
-    // Select the appropriate storage backend
-    let mut obj_storage: Box<dyn ObjectStorage> = match config.storage_backend {
-        StorageOption::FileSystem => {
-            Box::new(FsObjectStorage {
-                base_path: PathBuf::from(&config.blob_storage),
-            })
-        }
-        StorageOption::Sqlar => {
-            Box::new(SqlarObjectStorage {
-                sql: sql.clone(),
-            })
-        }
-        StorageOption::S3 => {
-            Box::new(S3ObjectStorage::new(config.clone()))
-        }
-    };
 
-    // Apply encryption if a key is provided
-    if !config.encryption_key.is_empty() {
-        obj_storage = Box::new(EncryptedObjectStorage::new(config.clone(), obj_storage));
+    // Select the appropriate storage backend
+    let mut obj_storage: Box<dyn ObjectStorage> = create_object_storage(config.primary.clone(), sql.clone());
+
+    // Add replicas
+    if !config.replicas.is_empty() {
+        let mut rep = ReplicatedObjectStorage {
+            primary: obj_storage,
+            replicas: vec![],
+        };
+
+        for (index, replica) in config.replicas.iter().enumerate() {
+            check_config_changes(&format!("replica_{}", index), replica.clone(), sql.clone()).unwrap();
+
+            rep.replicas.push(
+                create_object_storage(replica.clone(), sql.clone())
+            );
+        }
+
+        obj_storage = Box::new(rep);
     }
 
     // Wrap the storage backend in a StorageInterface, which provides a higher-level API
-    let storage = Box::new(StorageInterface::new(config.clone(), obj_storage));
+    let storage = Box::new(StorageInterface::new(obj_storage));
     let fs = SqlFileSystem::new(sql, config.clone(), storage);
 
     let cmd = cli.command.unwrap_or_else(|| Commands::Mount);
@@ -316,11 +311,11 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
     Ok(())
 }
 
-pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyhow::Error> {
+pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<SQL>) -> Result<(), anyhow::Error> {
     // Changing storage_option will make all the files not available
     let storage_option = config.storage_backend.to_string();
     {
-        let setting = sql.get_setting("storage_option")?;
+        let setting = sql.get_setting(&format!("{}:storage_option", prefix))?;
         if let Some(setting) = setting {
             if setting != storage_option {
                 error!("Storage option changed from {} to {}, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem", setting, storage_option);
@@ -330,13 +325,13 @@ pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyh
                 }
             }
         }
-        sql.set_setting("storage_option", &storage_option)?;
+        sql.set_setting(&format!("{}:storage_option", prefix), &storage_option)?;
     }
 
     // Changing encryption_key will make every file not readable
     let encryption_key = hex::encode(hmac_sha512::Hash::hash(&config.encryption_key));
     {
-        let setting = sql.get_setting("encryption_key_sha512")?;
+        let setting = sql.get_setting(&format!("{}:encryption_key_sha512", prefix))?;
 
         if let Some(setting) = setting {
             if setting != encryption_key {
@@ -347,12 +342,12 @@ pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyh
                 }
             }
         }
-        sql.set_setting("encryption_key_sha512", &encryption_key)?;
+        sql.set_setting(&format!("{}:encryption_key_sha512", prefix), &encryption_key)?;
     }
     // Changing use_hash_as_filename will cause in a mismatch between previous and new filenames
     let use_hash_as_filename = config.use_hash_as_filename.to_string();
     {
-        let setting = sql.get_setting("use_hash_as_filename")?;
+        let setting = sql.get_setting(&format!("{}:use_hash_as_filename", prefix))?;
         if let Some(setting) = setting {
             if setting != use_hash_as_filename {
                 error!("use_hash_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
@@ -362,14 +357,14 @@ pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyh
                 }
             }
         }
-        sql.set_setting("use_hash_as_filename", &use_hash_as_filename)?;
+        sql.set_setting(&format!("{}:use_hash_as_filename", prefix), &use_hash_as_filename)?;
     }
 
     // s3_bucket/s3_region/s3_endpoint_url
     if config.storage_backend == StorageOption::S3 {
-        let bucket = sql.get_setting("s3_bucket")?.unwrap_or_else(|| "".to_string());
-        let region = sql.get_setting("s3_region")?.unwrap_or_else(|| "".to_string());
-        let endpoint_url = sql.get_setting("s3_endpoint_url")?.unwrap_or_else(|| "".to_string());
+        let bucket = sql.get_setting(&format!("{}:s3_bucket", prefix))?.unwrap_or_else(|| "".to_string());
+        let region = sql.get_setting(&format!("{}:s3_region", prefix))?.unwrap_or_else(|| "".to_string());
+        let endpoint_url = sql.get_setting(&format!("{}:s3_endpoint_url", prefix))?.unwrap_or_else(|| "".to_string());
 
         if bucket != config.s3_bucket || region != config.s3_region || endpoint_url != config.s3_endpoint_url {
             error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
@@ -379,14 +374,14 @@ pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyh
             }
         }
 
-        sql.set_setting("s3_bucket", &bucket)?;
-        sql.set_setting("s3_region", &region)?;
-        sql.set_setting("s3_endpoint_url", &endpoint_url)?;
+        sql.set_setting(&format!("{}:s3_bucket", prefix), &bucket)?;
+        sql.set_setting(&format!("{}:s3_region", prefix), &region)?;
+        sql.set_setting(&format!("{}:s3_endpoint_url", prefix), &endpoint_url)?;
     }
 
     // Changing blob_storage will make all the files not available
     if config.storage_backend == StorageOption::FileSystem {
-        let setting = sql.get_setting("blob_storage")?;
+        let setting = sql.get_setting(&format!("{}:blob_storage", prefix))?;
         if let Some(setting) = setting {
             if setting != config.blob_storage {
                 error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
@@ -396,7 +391,7 @@ pub fn check_config_changes(config: Rc<Config>, sql: Rc<SQL>) -> Result<(), anyh
                 }
             }
         }
-        sql.set_setting("blob_storage", &config.blob_storage)?;
+        sql.set_setting(&format!("{}:blob_storage", prefix), &config.blob_storage)?;
     }
 
     Ok(())

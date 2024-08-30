@@ -14,6 +14,26 @@ mount_point: ./data
 # - sqlar: store blobs directly in the database, see https://sqlite.org/sqlar.html
 storage_backend: filesystem
 
+# Additional storage backends, properties:
+# - storage_backend
+# - blob_storage
+# - s3_endpoint_url
+# - s3_region
+# - s3_bucket
+# - s3_base_path
+# - s3_access_key
+# - s3_secret_key
+# - encryption_key
+# - compression_level
+# - use_hash_as_filename
+# Values not set are inherited from the main configuration
+primary: { }
+
+# Same settings as primary, but allows to specify multiple replicas
+# Write operations will be performed on all replicas, but read operations will be performed on the primary only
+# This can be useful to have copies of the data in different locations/backends
+replicas: [ ]
+
 # Required if [storage_backend] is filesystem.
 # Path where to store the blobs, must already exist and be a directory.
 blob_storage: ./blob
@@ -37,6 +57,10 @@ s3_secret_key: '****************************************'
 # If set, all blobs will be encrypted using AES-256-GCM, the key will unique for each blob
 # and derived from this value using PBKDF2-HMAC-SHA256 and salt
 encryption_key: ''
+
+# Values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
+# Automatically disabled if [encryption_key] is set
+compression_level: 0
 
 # If set to true, the blobs will be stored on a single folder with a hash as filename
 # otherwise, the original full path will be preserved

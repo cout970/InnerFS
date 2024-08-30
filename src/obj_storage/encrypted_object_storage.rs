@@ -1,5 +1,5 @@
-use crate::config::Config;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
+use crate::config::{StorageConfig};
+use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
 use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::rand_core::RngCore;
@@ -16,10 +16,11 @@ const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const AEAD_LEN: usize = 10;
 // More rounds are better, but slower, since they are used every file access, we need to keep them low
+// Technically, we are not storing the password nor the salted password, so it's **fine** (tm)
 const PBKDF2_ITERATIONS: u32 = 256;
 
 pub struct EncryptedObjectStorage {
-    config: Rc<Config>,
+    config: Rc<StorageConfig>,
     fs: Box<dyn ObjectStorage>,
 }
 
@@ -71,7 +72,7 @@ impl FileKey {
 }
 
 impl EncryptedObjectStorage {
-    pub fn new(config: Rc<Config>, fs: Box<dyn ObjectStorage>) -> EncryptedObjectStorage {
+    pub fn new(config: Rc<StorageConfig>, fs: Box<dyn ObjectStorage>) -> EncryptedObjectStorage {
         EncryptedObjectStorage { config, fs }
     }
 
@@ -185,6 +186,10 @@ impl ObjectStorage for EncryptedObjectStorage {
 
     fn nuke(&mut self) -> Result<(), Error> {
         self.fs.nuke()
+    }
+
+    fn get_uniqueness_test(&self) -> UniquenessTest {
+        UniquenessTest::AlwaysUnique
     }
 }
 
