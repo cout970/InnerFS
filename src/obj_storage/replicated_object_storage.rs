@@ -1,5 +1,6 @@
-use anyhow::Error;
-use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
+use crate::AnyError;
+use crate::obj_storage::{ObjInfo, ObjectStorage};
+use crate::storage::ObjInUseFn;
 
 pub struct ReplicatedObjectStorage {
     pub primary: Box<dyn ObjectStorage>,
@@ -7,11 +8,11 @@ pub struct ReplicatedObjectStorage {
 }
 
 impl ObjectStorage for ReplicatedObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
+    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
         self.primary.get(info)
     }
 
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
+    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
         self.primary.put(info, content)?;
         for replica in &mut self.replicas {
             replica.put(info, content)?;
@@ -19,31 +20,27 @@ impl ObjectStorage for ReplicatedObjectStorage {
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo) -> Result<(), Error> {
-        self.primary.remove(info)?;
+    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
+        self.primary.remove(info, is_in_use.clone())?;
         for replica in &mut self.replicas {
-            replica.remove(info)?;
+            replica.remove(info, is_in_use.clone())?;
         }
         Ok(())
     }
 
-    fn nuke(&mut self) -> Result<(), Error> {
+    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
+        self.primary.rename(prev_info, new_info)?;
+        for replica in &mut self.replicas {
+            replica.rename(prev_info, new_info)?;
+        }
+        Ok(())
+    }
+
+    fn nuke(&mut self) -> Result<(), AnyError> {
         self.primary.nuke()?;
         for replica in &mut self.replicas {
             replica.nuke()?;
         }
         Ok(())
-    }
-
-    fn get_uniqueness_test(&self) -> UniquenessTest {
-        let mut test = self.primary.get_uniqueness_test();
-
-        for replica in &self.replicas {
-            if replica.get_uniqueness_test() != test {
-                test = UniquenessTest::AlwaysUnique
-            }
-        }
-
-        test
     }
 }

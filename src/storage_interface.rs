@@ -1,10 +1,13 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use anyhow::anyhow;
-use crate::current_timestamp;
-use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
-use crate::sql::FileRow;
-use crate::storage::Storage;
+use libc::{O_APPEND, O_RDONLY};
+use crate::AnyError;
+use crate::obj_storage::{ObjInfo, ObjectStorage};
+use crate::metadata_db::FileRow;
+use crate::fuse_fs::OpenFlags;
+use crate::storage::{ObjInUseFn, Storage};
+use crate::utils::current_timestamp;
 
 pub struct StorageInterface {
     pub obj_storage: Box<dyn ObjectStorage>,
@@ -18,6 +21,7 @@ pub struct StorageInterfaceCache {
     pub content: Vec<u8>,
     pub retrieved: bool,
     pub modified: bool,
+    pub count: i32,
 }
 
 impl StorageInterface {
@@ -31,9 +35,30 @@ impl StorageInterface {
 }
 
 impl Storage for StorageInterface {
-    fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<bool, anyhow::Error> {
-        if (mode as i32) & libc::O_APPEND != 0 {
+    fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<bool, AnyError> {
+        if (mode as i32) & O_APPEND != 0 {
             return Err(anyhow::anyhow!("Append mode is not supported"));
+        }
+
+        // Allow multiple read-only opens
+        {
+            let prev = self.cache.get_mut(&file.id);
+
+            if let Some(cache) = prev {
+                let prev_flags = OpenFlags::from(cache.mode);
+                let new_flags = OpenFlags::from(mode as i32);
+                // Only allowed to open in read mode if it was previously opened in read mode
+                let valid = prev_flags.read_only && new_flags.read_only && !prev_flags.exclusive && !new_flags.exclusive;
+
+                if !valid {
+                    return Err(anyhow!(
+                        "File {} is already open in write mode:\n  prev={:?},\n  new={:?}",
+                        file.id, prev_flags, new_flags)
+                    );
+                }
+
+                cache.count += 1;
+            }
         }
 
         self.cache.insert(file.id, StorageInterfaceCache {
@@ -42,12 +67,13 @@ impl Storage for StorageInterface {
             content: vec![],
             retrieved: false,
             modified: false,
+            count: 1,
         });
 
         Ok(false)
     }
 
-    fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, anyhow::Error> {
+    fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
         let row = self.cache.get_mut(&file.id).ok_or_else(||
             anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
         )?;
@@ -77,12 +103,12 @@ impl Storage for StorageInterface {
         Ok(read_len)
     }
 
-    fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, anyhow::Error> {
+    fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
         let row = self.cache.get_mut(&file.id).ok_or_else(||
             anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
         )?;
 
-        if row.mode & libc::O_RDONLY != 0 {
+        if row.mode & O_RDONLY != 0 {
             return Err(anyhow::anyhow!("File is read-only"));
         }
 
@@ -109,12 +135,19 @@ impl Storage for StorageInterface {
         Ok(buff.len())
     }
 
-    fn close(&mut self, file: &mut FileRow) -> Result<bool, anyhow::Error> {
+    fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
         let mut modified = false;
-        {
+        let count = {
             let row = self.cache.get_mut(&file.id).ok_or_else(||
                 anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
             )?;
+
+            row.count -= 1;
+            row.count
+        };
+
+        {
+            let row = self.cache.get_mut(&file.id).unwrap();
 
             if row.modified {
                 // Shas of contents as id for the object
@@ -128,9 +161,11 @@ impl Storage for StorageInterface {
 
                 file.sha512 = sha512;
                 let mut info = ObjInfo::new(file, &row.full_path);
+                info.size = row.content.len() as u64;
 
                 // Store new object
                 self.obj_storage.put(&mut info, &row.content)?;
+
                 // Update file metadata
                 file.encryption_key = info.encryption_key;
                 file.size = row.content.len() as i64;
@@ -139,33 +174,44 @@ impl Storage for StorageInterface {
             }
         }
 
-        self.cache.remove(&file.id);
+        if count <= 0 {
+            self.cache.remove(&file.id);
+        }
         Ok(modified)
     }
 
-    fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), anyhow::Error> {
+    fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
+        if self.cache.contains_key(&file.id) {
+            return Err(anyhow!("File is open, cannot remove"));
+        }
         if !file.sha512.is_empty() {
             self.pending_remove.insert(ObjInfo::new(file, full_path));
         }
         Ok(())
     }
 
-    fn cleanup(&mut self, is_in_use: Box<dyn Fn(&ObjInfo, UniquenessTest) -> Result<bool, anyhow::Error>>) -> Result<(), anyhow::Error> {
-        let test = self.obj_storage.get_uniqueness_test();
+    fn rename(&mut self, file: &FileRow, prev_full_path: &str, new_full_path: &str) -> Result<(), AnyError> {
+        if self.cache.contains_key(&file.id) {
+            return Err(anyhow!("File is open, cannot rename"));
+        }
 
+        let prev_info = ObjInfo::new(file, prev_full_path);
+        let new_info = ObjInfo::new(file, new_full_path);
+
+        self.obj_storage.rename(&prev_info, &new_info)?;
+        Ok(())
+    }
+
+    fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
         for info in &self.pending_remove {
-            let in_use = (&is_in_use)(info, test)?;
-
-            if !in_use {
-                self.obj_storage.remove(info)?;
-            }
+            self.obj_storage.remove(info, is_in_use.clone())?;
         }
 
         self.pending_remove.clear();
         Ok(())
     }
 
-    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+    fn nuke(&mut self) -> Result<(), AnyError> {
         self.cache.clear();
         self.pending_remove.clear();
         self.obj_storage.nuke()

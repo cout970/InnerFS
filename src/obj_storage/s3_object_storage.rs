@@ -8,9 +8,10 @@ use aws_types::region::Region;
 use itertools::Itertools;
 use log::{info};
 use tokio::runtime::{Builder, Runtime};
-
+use crate::AnyError;
 use crate::config::{StorageConfig};
 use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
+use crate::storage::ObjInUseFn;
 
 pub struct S3ObjectStorage {
     pub config: Rc<StorageConfig>,
@@ -80,7 +81,18 @@ impl ObjectStorage for S3ObjectStorage {
         })
     }
 
-    fn remove(&mut self, info: &ObjInfo) -> Result<(), Error> {
+    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), Error> {
+        let test = if self.config.use_hash_as_filename {
+            UniquenessTest::Sha512
+        } else {
+            UniquenessTest::Path
+        };
+
+        // If is object in use by other file (deduplication), do not remove it
+        if is_in_use(info, test)? {
+            return Ok(());
+        }
+
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
         info!("Remove: {:?}", &path);
@@ -96,12 +108,28 @@ impl ObjectStorage for S3ObjectStorage {
         })
     }
 
-    fn get_uniqueness_test(&self) -> UniquenessTest {
-        if self.config.use_hash_as_filename {
-            UniquenessTest::Sha512
-        } else {
-            UniquenessTest::Path
-        }
+    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
+        let prev_path = self.path(prev_info);
+        let new_path = self.path(new_info);
+        let bucket_name = &self.config.s3_bucket;
+        info!("Rename: {:?} -> {:?}", &prev_path, &new_path);
+
+        self.rt.block_on(async {
+            self.client
+                .copy_object()
+                .bucket(bucket_name)
+                .copy_source(format!("{}/{}", bucket_name, prev_path))
+                .key(&new_path)
+                .send().await?;
+
+            self.client
+                .delete_object()
+                .bucket(bucket_name)
+                .key(&prev_path)
+                .send().await?;
+
+            Ok(())
+        })
     }
 
     fn nuke(&mut self) -> Result<(), Error> {

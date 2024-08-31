@@ -1,30 +1,33 @@
 use log::info;
-use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
+use crate::AnyError;
+use crate::obj_storage::{ObjInfo, ObjectStorage};
+use crate::storage::ObjInUseFn;
 
 pub struct DebugObjectStorage {}
 
 impl ObjectStorage for DebugObjectStorage {
-    fn get(&mut self, name: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
-        info!("Get: {}", name);
+    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
+        info!("Get: {}", info);
         Ok(vec![])
     }
 
-    fn put(&mut self, name: &mut ObjInfo, _content: &[u8]) -> Result<(), anyhow::Error> {
-        info!("Create: {}", name);
+    fn put(&mut self, info: &mut ObjInfo, _content: &[u8]) -> Result<(), AnyError> {
+        info!("Create: {}", info);
         Ok(())
     }
 
-    fn remove(&mut self, name: &ObjInfo) -> Result<(), anyhow::Error> {
-        info!("Remove: {}", name);
+    fn remove(&mut self, info: &ObjInfo, _is_in_use: ObjInUseFn) -> Result<(), AnyError> {
+        info!("Remove: {}", info);
         Ok(())
     }
 
-    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
+        info!("Rename: {} to {}", prev_info, new_info);
+        Ok(())
+    }
+
+    fn nuke(&mut self) -> Result<(), AnyError> {
         info!("Nuke");
         Ok(())
-    }
-
-    fn get_uniqueness_test(&self) -> UniquenessTest {
-        UniquenessTest::AlwaysUnique
     }
 }

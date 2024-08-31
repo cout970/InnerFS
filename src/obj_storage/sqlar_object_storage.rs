@@ -1,11 +1,13 @@
 use std::rc::Rc;
 use log::{info};
+use crate::AnyError;
 use crate::config::StorageConfig;
 use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
-use crate::sql::SQL;
+use crate::metadata_db::MetadataDB;
+use crate::storage::ObjInUseFn;
 
 pub struct SqlarObjectStorage {
-    pub sql: Rc<SQL>,
+    pub sql: Rc<MetadataDB>,
     pub config: Rc<StorageConfig>,
 }
 
@@ -27,7 +29,7 @@ pub struct SqlarFile {
 }
 
 impl ObjectStorage for SqlarObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error> {
+    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
         info!("Get: {}", info);
         let name = self.path(&info);
         let file = self.get_sqlar_file(&name)?;
@@ -37,44 +39,58 @@ impl ObjectStorage for SqlarObjectStorage {
         Ok(file.unwrap().data)
     }
 
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error> {
-        info!("Create: {}", info);
+    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
         let name = self.path(&info);
+        info!("Create: {}", name);
+
         let file = SqlarFile {
             name: name.clone(),
             mode: info.mode as i64,
             mtime: info.updated_at,
-            sz: content.len() as i64,
+            sz: info.size as i64,
             data: content.to_vec(),
         };
         self.set_sqlar_file(&name, &file)?;
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error> {
-        info!("Remove: {}", info);
+    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
+        let test = if self.config.use_hash_as_filename {
+            UniquenessTest::Sha512
+        } else {
+            UniquenessTest::Path
+        };
+
+        // If is object in use by other file (deduplication), do not remove it
+        if is_in_use(info, test)? {
+            return Ok(());
+        }
+
         let name = self.path(&info);
+        info!("Remove: {}", name);
+
         self.remove_sqlar_file(&name)?;
         Ok(())
     }
 
-    fn nuke(&mut self) -> Result<(), anyhow::Error> {
+    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
+        let prev_name = self.path(&prev_info);
+        let new_name = self.path(&new_info);
+        info!("Rename: {} -> {}", prev_name, new_name);
+
+        self.rename_sqlar_file(&prev_name, &new_name)?;
+        Ok(())
+    }
+
+    fn nuke(&mut self) -> Result<(), AnyError> {
         info!("Nuke");
         self.sql.execute0("DELETE FROM sqlar")?;
         Ok(())
     }
-
-    fn get_uniqueness_test(&self) -> UniquenessTest {
-        if self.config.use_hash_as_filename {
-            UniquenessTest::Sha512
-        } else {
-            UniquenessTest::Path
-        }
-    }
 }
 
 impl SqlarObjectStorage {
-    pub fn get_sqlar_file(&mut self, name: &str) -> Result<Option<SqlarFile>, anyhow::Error> {
+    pub fn get_sqlar_file(&mut self, name: &str) -> Result<Option<SqlarFile>, AnyError> {
         self.sql.get_row(
             "SELECT mode, mtime, sz, data FROM sqlar WHERE name = :name",
             (":name", name),
@@ -89,7 +105,7 @@ impl SqlarObjectStorage {
             })
     }
 
-    pub fn set_sqlar_file(&mut self, name: &str, file: &SqlarFile) -> Result<(), anyhow::Error> {
+    pub fn set_sqlar_file(&mut self, name: &str, file: &SqlarFile) -> Result<(), AnyError> {
         self.sql.execute5(
             "INSERT OR REPLACE INTO sqlar (name, mode, mtime, sz, data) VALUES (:name, :mode, :mtime, :sz, :data)",
             (":name", name),
@@ -101,7 +117,16 @@ impl SqlarObjectStorage {
         Ok(())
     }
 
-    pub fn remove_sqlar_file(&mut self, name: &str) -> Result<(), anyhow::Error> {
+    pub fn rename_sqlar_file(&mut self, prev_name: &str, new_name: &str) -> Result<(), AnyError> {
+        self.sql.execute2(
+            "UPDATE sqlar SET name = :new_name WHERE name = :prev_name",
+            (":new_name", new_name),
+            (":prev_name", prev_name),
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_sqlar_file(&mut self, name: &str) -> Result<(), AnyError> {
         self.sql.execute1("DELETE FROM sqlar WHERE name = :name", (":name", name))?;
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::config::{read_config, StorageConfig, StorageOption};
 use crate::obj_storage::{create_object_storage, ObjectStorage};
-use crate::proxy_fs::ProxyFileSystem;
-use crate::sql::SQL;
+use crate::fuse_fs::FuseFileSystem;
+use crate::metadata_db::{MetadataDB, NO_BINDINGS};
 use anyhow::{anyhow, Context};
 use env_logger::Env;
 use fs::File;
@@ -12,28 +12,33 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::{env, fs};
+use std::{env, fs, thread};
 
 mod config;
-mod sql;
-mod proxy_fs;
+mod metadata_db;
+mod fuse_fs;
 mod sql_fs;
 mod storage;
 mod obj_storage;
 mod storage_interface;
 mod fs_tree;
+mod utils;
 
 use crate::fs_tree::{FsTree, FsTreeKind};
 use crate::sql_fs::SqlFileSystem;
 use crate::storage_interface::StorageInterface;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::{write::GzEncoder, Compression};
+use serde_json::json;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 use crate::obj_storage::replicated_object_storage::ReplicatedObjectStorage;
+use crate::utils::humanize_bytes_binary;
+use signal_hook::{consts::SIGINT, iterator::Signals};
+use utils::ask_for_confirmation;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub type AnyError = anyhow::Error;
 
 /// Utility to mount a shadow filesystem, supports encryption and multiple storage backends: S3, Sqlar and FileSystem
 #[derive(Parser)]
@@ -53,9 +58,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// mount the filesystem
+    /// Mount the filesystem
     Mount,
-    /// delete all data stored
+    /// Delete all data stored
     Nuke {
         /// Force the deletion without asking for confirmation
         #[arg(short, long, default_value_t = false)]
@@ -63,13 +68,13 @@ enum Commands {
     },
     /// Export the file metadata index to a file
     ExportIndex {
-        /// export format: json or yaml
+        /// Export format: json or yaml
         #[arg(short, long, value_enum, default_value_t = IndexExportFormat::Json)]
         format: IndexExportFormat,
     },
     /// Export the whole filesystem to a file
     ExportFiles {
-        /// export format: tar or zip
+        /// Export format: tar or zip
         #[arg(short, long, value_enum, default_value_t = FileExportFormat::Directory)]
         format: FileExportFormat,
 
@@ -77,8 +82,10 @@ enum Commands {
         #[arg(short, long, value_name = "FILE")]
         path: PathBuf,
     },
-    // Generate a default config file
+    /// Generate a default config file
     GenerateConfig,
+    /// Print stats about the filesystem
+    Stats,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -94,11 +101,15 @@ pub enum FileExportFormat {
     Zip,
 }
 
+
 fn main() {
     let cli = Cli::parse();
 
-    let default_log_filter = if cli.debug { "debug" } else { "info" };
-    env_logger::Builder::from_env(Env::default().default_filter_or(default_log_filter)).init();
+    env_logger::Builder::from_env(Env::default())
+        .filter(Some("fuse"), log::LevelFilter::Info)
+        .filter(Some("InnerFS::proxy_fs"), if cli.debug { log::LevelFilter::Trace } else { log::LevelFilter::Info })
+        .filter(Some("InnerFS"), if cli.debug { log::LevelFilter::Trace } else { log::LevelFilter::Info })
+        .init();
 
     let config_path = cli.config.or_else(|| Some(PathBuf::from("./config.yml"))).unwrap();
 
@@ -135,13 +146,18 @@ fn main() {
     let config = read_config(&config_path).expect("Unable to read config");
 
     info!("Config loaded");
-    let sql = Rc::new(SQL::open(&config.database_file));
+    let sql = Rc::new(MetadataDB::open(&config.database_file));
 
     // Run migrations
     sql.run_migrations().expect("Unable to run migrations");
 
-    // Check if the config file has changed in incompatible ways
-    check_config_changes("primary", config.primary.clone(), sql.clone()).unwrap();
+    // Check if the config file has changed in incompatible ways (except for the nuke command)
+    match cli.command {
+        Some(Commands::Nuke { .. }) => {}
+        _ => {
+            check_config_changes("primary", config.primary.clone(), sql.clone()).unwrap();
+        }
+    }
 
     info!("Database opened");
 
@@ -177,7 +193,8 @@ fn main() {
         Commands::Nuke { force } => nuke(fs, force),
         Commands::ExportIndex { format } => export_index(fs, format).unwrap(),
         Commands::ExportFiles { format, path } => export_files(fs, format, path).unwrap(),
-        Commands::GenerateConfig => unreachable!()
+        Commands::GenerateConfig => unreachable!(),
+        Commands::Stats => stats(fs).unwrap(),
     }
 }
 
@@ -185,7 +202,7 @@ fn mount(fs: SqlFileSystem) {
     let mount_point = fs.config.mount_point.clone();
 
     // Create a FUSE proxy filesystem to access the StorageInterface
-    let proxy = ProxyFileSystem::new(fs);
+    let proxy = FuseFileSystem::new(fs);
 
     // Try to unmount the filesystem, it may be already mounted form a previous run
     // This must be performed before trying to check if the file exists
@@ -198,8 +215,31 @@ fn mount(fs: SqlFileSystem) {
         panic!("Mount point is not a directory");
     }
 
+    let mut signals = Signals::new([SIGINT]).unwrap();
+
+    let mount_point_copy = mount_point.clone();
+    thread::spawn(move || {
+        // Wait for a SIGINT signal to unmount the filesystem
+        for _ in signals.forever() {
+            println!("Received SIGINT, trying to unmount the filesystem");
+            let _ = Command::new("umount").arg(&mount_point_copy).status();
+
+            // Finish this thread
+            break;
+        }
+    });
+
     info!("Mounting filesystem at {}", &mount_point);
-    fuse::mount(proxy, &mount_point, &[OsStr::new("noempty")]).expect("Unable to mount filesystem");
+    match fuse::mount(proxy, &mount_point, &[OsStr::new("noempty"), OsStr::new("default_permissions")]) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Unable to mount filesystem: {}", e);
+            error!("Maybe is was mounted before?, try `umount {}`", &mount_point);
+            error!("If it says `target is busy`, close the programs that are using the mount point");
+            error!("Existing");
+            std::process::exit(-1);
+        }
+    }
 
     info!("Folder was unmounted successfully, exiting");
 }
@@ -219,7 +259,7 @@ fn nuke(mut fs: SqlFileSystem, force: bool) {
     info!("Done");
 }
 
-fn export_index(fs: SqlFileSystem, format: IndexExportFormat) -> Result<(), anyhow::Error> {
+fn export_index(fs: SqlFileSystem, format: IndexExportFormat) -> Result<(), AnyError> {
     info!("Exporting index");
     let tree = fs.sql.get_tree()?;
 
@@ -234,7 +274,7 @@ fn export_index(fs: SqlFileSystem, format: IndexExportFormat) -> Result<(), anyh
     Ok(())
 }
 
-fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathBuf) -> Result<(), anyhow::Error> {
+fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathBuf) -> Result<(), AnyError> {
     info!("Exporting files to {:?}", &path);
     let tree = fs.sql.get_tree()?;
 
@@ -311,7 +351,98 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
     Ok(())
 }
 
-pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<SQL>) -> Result<(), anyhow::Error> {
+fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
+    let [total, directories, regular] = fs.sql.get_row(
+        "
+        SELECT count(*)                      AS total,
+               count(iif(kind = 0, 1, NULL)) AS directories,
+               count(iif(kind = 1, 1, NULL)) AS regular
+        FROM files",
+        NO_BINDINGS.as_ref(),
+        |row| {
+            Ok([
+                row.read::<i64, _>("total")?,
+                row.read::<i64, _>("directories")?,
+                row.read::<i64, _>("regular")?,
+            ])
+        },
+    )?.unwrap();
+
+    let top_largest_files = fs.sql.get_rows(
+        "
+        SELECT name, size
+        FROM files
+        ORDER BY size DESC
+        LIMIT 5",
+        NO_BINDINGS.as_ref(),
+        |row| {
+            Ok(json!({
+                "name": row.read::<String, _>("name")?,
+                "size": row.read::<i64, _>("size")?,
+            }))
+        },
+    )?;
+
+    let top_used_extensions = fs.sql.get_rows(
+        "
+        SELECT replace(name, rtrim(name, replace(name, '.', '')), '') AS extension,
+               count(*)                                               AS count
+        FROM files
+        WHERE name LIKE '%.%'
+          AND name NOT LIKE '.%'
+          AND kind = 0
+        GROUP BY extension
+        ORDER BY count DESC
+        LIMIT 10;",
+        NO_BINDINGS.as_ref(),
+        |row| {
+            Ok(json!({
+                "extension": row.read::<String, _>("extension")?,
+                "count": row.read::<i64, _>("count")?,
+            }))
+        },
+    )?;
+
+    let [sqlar_total, sqlar_size, sqlar_size_real] = fs.sql.get_row(
+        "
+        SELECT count(*)          AS total,
+               sum(sz)           AS size,
+               sum(length(data)) AS size_real
+        FROM sqlar",
+        NO_BINDINGS.as_ref(),
+        |row| {
+            Ok([
+                row.read::<i64, _>("total")?,
+                row.read::<i64, _>("size")?,
+                row.read::<i64, _>("size_real")?,
+            ])
+        },
+    )?.unwrap();
+
+    let stats = json!({
+        "files": {
+            "total": total,
+            "directories": directories,
+            "regular": regular,
+        },
+        "summary": {
+            "top_largest_files": top_largest_files,
+            "top_used_extensions": top_used_extensions,
+        },
+        "sqlar": {
+            "total": sqlar_total,
+            "original_size": humanize_bytes_binary(sqlar_size  as usize),
+            "original_size_bytes": sqlar_size,
+            "computed_size": humanize_bytes_binary(sqlar_size_real as usize),
+            "computed_size_bytes": sqlar_size_real,
+        }
+    });
+
+    println!("{}", serde_json::to_string_pretty(&stats)?);
+    Ok(())
+}
+
+pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> Result<(), AnyError> {
     // Changing storage_option will make all the files not available
     let storage_option = config.storage_backend.to_string();
     {
@@ -395,17 +526,6 @@ pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<SQL
     }
 
     Ok(())
-}
-
-pub fn ask_for_confirmation() -> bool {
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
-    let choice = input.trim().to_ascii_lowercase();
-    choice == "yes" || choice == "y"
-}
-
-pub fn current_timestamp() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 impl Display for IndexExportFormat {

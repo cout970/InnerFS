@@ -1,5 +1,7 @@
-use crate::config::{StorageConfig};
-use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
+use crate::config::StorageConfig;
+use crate::obj_storage::{ObjInfo, ObjectStorage};
+use crate::storage::ObjInUseFn;
+use crate::AnyError;
 use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::rand_core::RngCore;
@@ -176,20 +178,35 @@ impl ObjectStorage for EncryptedObjectStorage {
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo) -> Result<(), Error> {
+    fn remove(&mut self, info: &ObjInfo, _is_in_use: ObjInUseFn) -> Result<(), Error> {
         let key = FileKey::deserialize(&info.encryption_key)?;
         let mut info = info.clone();
         info.full_path = self.path(&key, &info.full_path);
+        let always_unique: ObjInUseFn = Rc::new(|_, _| Ok(false));
 
-        self.fs.remove(&info)
+        self.fs.remove(&info, always_unique)
+    }
+
+    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
+        let key = FileKey::deserialize(&prev_info.encryption_key)?;
+        let prev_path = self.path(&key, &prev_info.full_path);
+        let new_path = self.path(&key, &new_info.full_path);
+
+        if prev_path != new_path {
+            let mut prev_info = prev_info.clone();
+            let mut new_info = new_info.clone();
+
+            prev_info.full_path = prev_path;
+            new_info.full_path = new_path;
+
+            self.fs.rename(&prev_info, &new_info)?;
+        }
+
+        Ok(())
     }
 
     fn nuke(&mut self) -> Result<(), Error> {
         self.fs.nuke()
-    }
-
-    fn get_uniqueness_test(&self) -> UniquenessTest {
-        UniquenessTest::AlwaysUnique
     }
 }
 

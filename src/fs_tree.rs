@@ -1,8 +1,9 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use crate::sql::{FileRow, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
 use serde::{Deserialize, Serialize};
+use crate::AnyError;
 
 pub type FsTreeRef = Rc<RefCell<FsTree>>;
 
@@ -54,9 +55,9 @@ impl<'a> From<FileRow> for FsTree {
 }
 
 impl FsTree {
-    pub fn for_each<F>(root: FsTreeRef, mut func: F) -> Result<(), anyhow::Error>
+    pub fn for_each<F>(root: FsTreeRef, mut func: F) -> Result<(), AnyError>
     where
-        F: FnMut(&FsTree, PathBuf) -> Result<(), anyhow::Error>,
+        F: FnMut(&FsTree, PathBuf) -> Result<(), AnyError>,
     {
         let mut queue = vec![(root, PathBuf::new())];
 

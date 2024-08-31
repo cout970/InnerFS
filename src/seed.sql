@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS file_changes (
     file_id INTEGER NOT NULL,
     file_version INTEGER NOT NULL,
     kind INTEGER NOT NULL, -- 0: created, 1: updated, 2: deleted
-    file_sha512 TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
     changed_at INTEGER NOT NULL
 );
 

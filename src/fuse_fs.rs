@@ -3,21 +3,23 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use fuse::{FileAttr, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs, ReplyWrite, Request};
-use libc::{c_int, ENOENT, ENOSYS, EOPNOTSUPP, O_APPEND, O_CREAT, O_EXCL, O_NOCTTY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+use libc::{c_int, ENOENT, ENOSYS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY};
 use log::{error, trace, warn};
-use time::{get_time, Timespec};
+use time::{Timespec};
 
-use crate::sql::{FileRow};
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::sql_fs::SqlFileSystem;
 
 const BLOCK_SIZE: u32 = 65536; // 64kb
+const FINE_LOGGING: bool = false;
 
-pub struct ProxyFileSystem {
+pub struct FuseFileSystem {
     pub fs: SqlFileSystem,
     pub open_files: HashMap<u64, u64>,
     pub fh_counter: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct OpenFlags {
     pub read_only: bool,
@@ -28,6 +30,12 @@ pub struct OpenFlags {
     pub exclusive: bool,
     pub truncate: bool,
     pub no_tty: bool,
+    pub non_block: bool,
+    pub sync: bool,
+    pub data_sync: bool,
+    pub no_access_time: bool,
+    pub path_only: bool,
+    pub tmp_file: bool,
     pub other: i32,
 }
 
@@ -42,7 +50,13 @@ impl OpenFlags {
             exclusive: flags & O_EXCL != 0,
             truncate: flags & O_TRUNC != 0,
             no_tty: flags & O_NOCTTY != 0,
-            other: flags & !(O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY),
+            non_block: flags & O_NONBLOCK != 0,
+            sync: flags & O_SYNC != 0,
+            data_sync: flags & O_DSYNC != 0,
+            no_access_time: flags & O_NOATIME != 0,
+            path_only: flags & O_PATH != 0,
+            tmp_file: flags & O_TMPFILE != 0,
+            other: flags & !(O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY | O_NONBLOCK | O_SYNC | O_DSYNC | O_NOATIME | O_PATH | O_TMPFILE),
         }
     }
 
@@ -67,17 +81,21 @@ impl OpenFlags {
     }
 }
 
-impl ProxyFileSystem {
+impl FuseFileSystem {
     pub fn new(fs: SqlFileSystem) -> Self {
-        ProxyFileSystem {
+        FuseFileSystem {
             fs,
             open_files: HashMap::new(),
             fh_counter: 0,
         }
     }
+
+    pub fn get_ttl(&self) -> Timespec {
+        Timespec::new(1, 0)
+    }
 }
 
-impl Filesystem for ProxyFileSystem {
+impl Filesystem for FuseFileSystem {
     fn init(&mut self, _req: &Request) -> Result<(), c_int> {
         trace!("FS init");
         Ok(())
@@ -88,14 +106,16 @@ impl Filesystem for ProxyFileSystem {
     }
 
     fn lookup(&mut self, _req: &Request, parent: u64, os_name: &OsStr, reply: ReplyEntry) {
-        trace!("FS lookup(parent: {}, name: {:?})", parent, os_name);
+        if FINE_LOGGING {
+            trace!("FS lookup(parent: {}, name: {:?})", parent, os_name);
+        }
         let name = os_name.to_string_lossy();
 
-        match self.fs.lookup(parent, &name) {
+        match self.fs.lookup(parent as i64, &name) {
             Ok(file) => {
                 if let Some(file) = file {
                     let attr = FileAttr::from(&file);
-                    reply.entry(&get_time(), &attr, 0);
+                    reply.entry(&self.get_ttl(), &attr, 0);
                 } else {
                     reply.error(ENOENT);
                 }
@@ -108,12 +128,14 @@ impl Filesystem for ProxyFileSystem {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        trace!("FS getattr(ino: {})", ino);
+        if FINE_LOGGING {
+            trace!("FS getattr(ino: {})", ino);
+        }
 
         match self.fs.getattr(ino as i64) {
             Ok(file) => {
                 let attr = FileAttr::from(&file);
-                reply.attr(&get_time(), &attr);
+                reply.attr(&self.get_ttl(), &attr);
             }
             Err(e) => {
                 error!("Error looking up file: {:?}", e.error);
@@ -133,7 +155,7 @@ impl Filesystem for ProxyFileSystem {
         ) {
             Ok(file) => {
                 let attr = FileAttr::from(&file);
-                reply.attr(&get_time(), &attr);
+                reply.attr(&self.get_ttl(), &attr);
             }
             Err(e) => {
                 error!("Error looking up file: {:?}", e.error);
@@ -154,7 +176,7 @@ impl Filesystem for ProxyFileSystem {
         match self.fs.mknod(parent as i64, &name, req.uid(), req.gid(), mode) {
             Ok(file) => {
                 let attr = FileAttr::from(&file);
-                reply.entry(&get_time(), &attr, 0);
+                reply.entry(&self.get_ttl(), &attr, 0);
             }
             Err(e) => {
                 error!("Error creating file: {:?}", e.error);
@@ -166,10 +188,10 @@ impl Filesystem for ProxyFileSystem {
     fn mkdir(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, reply: ReplyEntry) {
         trace!("FS mkdir(parent: {}, name: {:?}, mode: {})", parent, name, mode);
         let name = name.to_string_lossy();
-        match self.fs.mkdir(parent, &name, req.uid(), req.gid(), mode) {
+        match self.fs.mkdir(parent as i64, &name, req.uid(), req.gid(), mode) {
             Ok(file) => {
                 let attr = FileAttr::from(&file);
-                reply.entry(&get_time(), &attr, 0);
+                reply.entry(&self.get_ttl(), &attr, 0);
             }
             Err(e) => {
                 error!("Error creating directory: {:?}", e.error);
@@ -220,15 +242,37 @@ impl Filesystem for ProxyFileSystem {
             return;
         }
 
-        // Not allowed to move across directories
-        if parent != new_parent_id {
-            error!("Unable to move file to new folder: Functionality not supported");
-            reply.error(EOPNOTSUPP);
-            return;
-        }
-
         let old_name = os_name.to_string_lossy();
         let new_name = new_os_name.to_string_lossy();
+
+        let file = self.fs.lookup(parent as i64, old_name.as_ref()).unwrap();
+        match file {
+            Some(file) => {
+                if self.open_files.values().any(|f| *f == file.id as u64) {
+                    error!("Error renaming file {} {:?} to {:?}, file in use ({:?})", file.id, old_name, new_name, self.open_files);
+                    reply.error(ENOSYS);
+                    return;
+                }
+            }
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        }
+
+        // Not allowed to move across directories
+        if parent != new_parent_id {
+            match self.fs.move_file(parent as i64, &old_name, new_parent_id as i64, &new_name) {
+                Ok(_) => {
+                    reply.ok();
+                }
+                Err(e) => {
+                    error!("Error renaming file: {:?}", e.error);
+                    reply.error(e.code);
+                }
+            }
+            return;
+        }
 
         match self.fs.rename(parent as i64, &old_name, &new_name) {
             Ok(_) => {
@@ -302,6 +346,7 @@ impl Filesystem for ProxyFileSystem {
         trace!("FS release(ino: {}, file_handle: {}, flags: {})", ino, fh, _flags);
         match self.fs.release(ino as i64) {
             Ok(_) => {
+                self.open_files.remove(&fh);
                 reply.ok();
             }
             Err(e) => {
@@ -312,24 +357,31 @@ impl Filesystem for ProxyFileSystem {
     }
 
     fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
-        trace!("FS fsync(ino: {}, file_handle: {}, datasync: {})", _ino, _fh, _datasync);
+        if FINE_LOGGING {
+            trace!("FS fsync(ino: {}, file_handle: {}, datasync: {})", _ino, _fh, _datasync);
+        }
         reply.ok();
     }
 
     fn opendir(&mut self, _req: &Request, _ino: u64, _flags: u32, reply: ReplyOpen) {
-        trace!("FS opendir(ino: {}, flags: {})", _ino, _flags);
+        if FINE_LOGGING {
+            trace!("FS opendir(ino: {}, flags: {})", _ino, _flags);
+        }
         reply.opened(0, 0);
     }
 
     fn readdir(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        trace!("FS readdir(ino: {}, file_handle: {}, offset: {})", ino, fh, offset);
+        if FINE_LOGGING {
+            trace!("FS readdir(ino: {}, file_handle: {}, offset: {})", ino, fh, offset);
+        }
 
         match self.fs.readdir(ino as i64, offset) {
             Ok(entries) => {
                 let mut index = offset + 1;
                 for e in entries {
-                    let fuse_kind = if e.kind == 1 { fuse::FileType::Directory } else { fuse::FileType::RegularFile };
-                    if reply.add(e.entry_file_id as u64, index, fuse_kind, e.name) {
+                    let fuse_kind = if e.kind == FILE_KIND_DIRECTORY { fuse::FileType::Directory } else { fuse::FileType::RegularFile };
+                    let ino = e.entry_file_id as u64;
+                    if reply.add(ino, index, fuse_kind, e.name) {
                         break;
                     }
                     index += 1;
@@ -344,12 +396,16 @@ impl Filesystem for ProxyFileSystem {
     }
 
     fn releasedir(&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: u32, reply: ReplyEmpty) {
-        trace!("FS releasedir(ino: {}, file_handle: {}, flags: {})", _ino, _fh, _flags);
+        if FINE_LOGGING {
+            trace!("FS releasedir(ino: {}, file_handle: {}, flags: {})", _ino, _fh, _flags);
+        }
         reply.ok();
     }
 
     fn fsyncdir(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
-        trace!("FS fsyncdir(ino: {}, file_handle: {}, datasync: {})", _ino, _fh, _datasync);
+        if FINE_LOGGING {
+            trace!("FS fsyncdir(ino: {}, file_handle: {}, datasync: {})", _ino, _fh, _datasync);
+        }
         reply.ok();
     }
 
@@ -381,21 +437,21 @@ impl Filesystem for ProxyFileSystem {
         let flags = open_flags.to_safe_flags() as u32;
 
         let name = name.to_string_lossy();
-        let file = match self.fs.lookup(parent, &name) {
+        let file = match self.fs.lookup(parent as i64, &name) {
             Ok(Some(file)) => {
                 file
-            },
+            }
             Ok(None) => {
                 let res = self.fs.mknod(parent as i64, &name, req.uid(), req.gid(), mode);
 
-                if let Err(e) = res {
-                    error!("Error creating file: {:?}", e.error);
-                    reply.error(e.code);
-                    return;
+                match res {
+                    Err(e) => {
+                        error!("Error creating file: {:?}", e.error);
+                        reply.error(e.code);
+                        return;
+                    }
+                    Ok(file) => file
                 }
-
-                let file = res.unwrap();
-                file
             }
             Err(e) => {
                 error!("Error looking up file: {:?}", e.error);

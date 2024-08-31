@@ -1,13 +1,15 @@
 use crate::config::{StorageConfig, StorageOption};
 use crate::obj_storage::fs_object_storage::FsObjectStorage;
 use crate::obj_storage::s3_object_storage::S3ObjectStorage;
-use crate::sql::{FileRow, SQL};
+use crate::metadata_db::{FileRow, MetadataDB};
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::Rc;
+use crate::AnyError;
 use crate::obj_storage::compressed_object_storage::CompressedObjectStorage;
 use crate::obj_storage::encrypted_object_storage::EncryptedObjectStorage;
 use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
+use crate::storage::ObjInUseFn;
 
 // Storage backends
 pub mod fs_object_storage;
@@ -29,6 +31,7 @@ pub struct ObjInfo {
     pub accessed_at: i64,
     pub updated_at: i64,
     pub mode: u32,
+    pub size: u64,
     pub encryption_key: String,
 }
 
@@ -41,16 +44,14 @@ pub enum UniquenessTest {
     Path,
     // Check if there are other files with the same content
     Sha512,
-    // File contents will always be unique
-    AlwaysUnique,
 }
 
 pub trait ObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, anyhow::Error>;
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), anyhow::Error>;
-    fn remove(&mut self, info: &ObjInfo) -> Result<(), anyhow::Error>;
-    fn nuke(&mut self) -> Result<(), anyhow::Error>;
-    fn get_uniqueness_test(&self) -> UniquenessTest;
+    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError>;
+    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError>;
+    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError>;
+    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError>;
+    fn nuke(&mut self) -> Result<(), AnyError>;
 }
 
 impl Display for ObjInfo {
@@ -69,12 +70,13 @@ impl ObjInfo {
             accessed_at: file.accessed_at,
             updated_at: file.updated_at,
             mode: file.perms as u32,
+            size: file.size as u64,
             encryption_key: file.encryption_key.to_string(),
         }
     }
 }
 
-pub fn create_object_storage(config: Rc<StorageConfig>, sql: Rc<SQL>) -> Box<dyn ObjectStorage> {
+pub fn create_object_storage(config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> Box<dyn ObjectStorage> {
     let mut obj_storage: Box<dyn ObjectStorage> = match &config.storage_backend {
         StorageOption::FileSystem => {
             Box::new(FsObjectStorage {
