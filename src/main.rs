@@ -511,7 +511,7 @@ pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<Met
     }
 
     // Changing blob_storage will make all the files not available
-    if config.storage_backend == StorageOption::FileSystem {
+    if config.storage_backend == StorageOption::FileSystem || config.storage_backend == StorageOption::RocksDb {
         let setting = sql.get_setting(&format!("{}:blob_storage", prefix))?;
         if let Some(setting) = setting {
             if setting != config.blob_storage {

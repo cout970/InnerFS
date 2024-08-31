@@ -48,6 +48,7 @@ pub enum StorageOption {
     FileSystem,
     Sqlar,
     S3,
+    RocksDb,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +222,7 @@ impl StorageOption {
             "filesystem" => Ok(StorageOption::FileSystem),
             "sqlar" => Ok(StorageOption::Sqlar),
             "s3" => Ok(StorageOption::S3),
+            "rocksdb" => Ok(StorageOption::RocksDb),
             _ => Err(anyhow!("Invalid storage option")),
         }
     }
@@ -232,6 +234,7 @@ impl Display for StorageOption {
             StorageOption::FileSystem => write!(f, "filesystem"),
             StorageOption::Sqlar => write!(f, "sqlar"),
             StorageOption::S3 => write!(f, "s3"),
+            StorageOption::RocksDb => write!(f, "rocksdb"),
         }
     }
 }

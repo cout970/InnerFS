@@ -15,20 +15,21 @@
 - [x] Add file change history table
 - [x] Add file compression using gzip
 - [x] Add multiple storage point for replication (primary replicas)
-- Stats sub command
+- [x] Stats sub command
+- [x] Support RocksDB
+- Verify integrity of files, check sha512 and size
 - Add local cache to speed up remote reads like catfs
-- Test if is posible to run operation in an async context
+- Test if is posible to run operations in an async context
 - Implement methods from the newest FUSE ABI
 - Add benchmarks showing the performance with different config parameters
-- Verify integrity of files, check sha512 and size
 - Import index from json/yaml, maybe?
+- Generate index from existing folder
+- Add option to change the encryption key
+- Store compression algorithm and settings in the index to support mixed compression algorithms 
 - Sync between machines/instances
 - Sync with folder, like rsync
 - Encryption of index.db
-- Automatic save to git every few minutes if changes are present
 - Docker image
-- Support RocksDB
-- Support Redis
 - Read only mode
 - Export to sqlar, even if the files are stored in S3
 - Export to .innerfs file, that is a sqlar file with the index and the files

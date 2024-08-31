@@ -8,6 +8,7 @@ use std::rc::Rc;
 use crate::AnyError;
 use crate::obj_storage::compressed_object_storage::CompressedObjectStorage;
 use crate::obj_storage::encrypted_object_storage::EncryptedObjectStorage;
+use crate::obj_storage::rocks_db_object_storage::RocksDbObjectStorage;
 use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
 use crate::storage::ObjInUseFn;
 
@@ -15,6 +16,7 @@ use crate::storage::ObjInUseFn;
 pub mod fs_object_storage;
 pub mod s3_object_storage;
 pub mod sqlar_object_storage;
+pub mod rocks_db_object_storage;
 pub mod debug_object_storage;
 
 // Wrappers
@@ -92,6 +94,9 @@ pub fn create_object_storage(config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> 
         }
         StorageOption::S3 => {
             Box::new(S3ObjectStorage::new(config.clone()))
+        }
+        StorageOption::RocksDb => {
+            Box::new(RocksDbObjectStorage::new(config.clone()))
         }
     };
 
