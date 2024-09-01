@@ -6,14 +6,14 @@ use anyhow::{anyhow, Error};
 use serde::{Deserialize, Serialize};
 use crate::obj_storage::ObjInfo;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct YamlConfig {
     database_file: Option<String>,
     mount_point: Option<String>,
     update_access_time: Option<bool>,
     store_file_change_history: Option<bool>,
     primary: Option<YamlStorageConfig>,
-    replicas: Vec<YamlStorageConfig>,
+    replicas: Option<Vec<YamlStorageConfig>>,
     // Default value for each backend
     blob_storage: Option<String>,
     storage_backend: Option<String>,
@@ -131,7 +131,8 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
         store_file_change_history: config.store_file_change_history.unwrap_or(true),
     };
 
-    for replica in &config.replicas {
+    let replicas = config.replicas.clone().unwrap_or_default();
+    for replica in &replicas {
         cfg.replicas.push(Rc::new(StorageConfig {
             storage_backend: StorageOption::from_string(
                 &replica.storage_backend.clone()

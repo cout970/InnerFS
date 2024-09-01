@@ -35,6 +35,7 @@ pub struct ObjInfo {
     pub mode: u32,
     pub size: u64,
     pub encryption_key: String,
+    pub compression: String,
 }
 
 /// Method to test is a file exists, to handle deletion of de-duplicated files.
@@ -74,6 +75,7 @@ impl ObjInfo {
             mode: file.perms as u32,
             size: file.size as u64,
             encryption_key: file.encryption_key.to_string(),
+            compression: file.compression.to_string(),
         }
     }
 }

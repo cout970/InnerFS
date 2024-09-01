@@ -18,6 +18,12 @@ impl CompressedObjectStorage {
 impl ObjectStorage for CompressedObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
         let bytes = self.proxy.get(info)?;
+
+        // No compression was used for this object
+        if info.compression.is_empty() {
+            return Ok(bytes);
+        }
+
         let mut buff = vec![];
         {
             let mut gz = flate2::read::GzDecoder::new(&bytes[..]);
@@ -35,6 +41,7 @@ impl ObjectStorage for CompressedObjectStorage {
             gz.finish()?;
         }
 
+        info.compression = format!("gzip:{}", self.level);
         self.proxy.put(info, buff.as_slice())?;
         Ok(())
     }

@@ -8,65 +8,45 @@ database_file: ./index.db
 # Path where to mount the filesystem, must already exist and be a directory.
 mount_point: ./data
 
-# Storage backend, can be either:
-# - filesystem: store blobs on the local path, see [blob_storage]
-# - s3: store blobs on an S3 compatible storage, see other S3 options
-# - sqlar: store blobs directly in the database, see https://sqlite.org/sqlar.html
-storage_backend: filesystem
-
-# Additional storage backends, properties:
-# - storage_backend
-# - blob_storage
-# - s3_endpoint_url
-# - s3_region
-# - s3_bucket
-# - s3_base_path
-# - s3_access_key
-# - s3_secret_key
-# - encryption_key
-# - compression_level
-# - use_hash_as_filename
+# Primary storage backend, reads/writes will be performed here, replicas will be write-only
 # Values not set are inherited from the main configuration
-primary: { }
+primary:
+  # Storage backend, case-insensitive, can be either:
+  # - filesystem: store blobs/objects on the local path, see [blob_storage]
+  # - s3: store blobs/objects on an S3 compatible storage, see other S3 options
+  # - sqlar: store blobs/objects directly in the database, see https://sqlite.org/sqlar.html
+  # - rockdb: store in a RocksDB database at [blob_storage], see https://rocksdb.org/
+  storage_backend: filesystem
+  # Required if [storage_backend] is filesystem or [rockdb]
+  # Path where to store the blobs, must already exist and be a directory.
+  blob_storage: ./blob
+  # Required if [storage_backend] is S3.
+  # S3 bucket name
+  s3_bucket: my-bucket
+  # S3 region, ignored if [s3_endpoint_url] is not empty
+  s3_region: localhost
+  # S3 endpoint URL, for providers other than AWS, like https://min.io/
+  s3_endpoint_url: 'http://127.0.0.1:9000'
+  # S3 access key
+  s3_access_key: '********************'
+  # S3 secret key
+  s3_secret_key: '****************************************'
+  # If set, all blobs will be encrypted using AES-256-GCM, the key will unique for each blob
+  # and derived from this value using PBKDF2-HMAC-SHA256 and salt
+  encryption_key: ''
+  # Gzip compression, values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
+  # Automatically disabled if [encryption_key] is set, not recommended for backends that already compress data, like RocksBD or S3
+  compression_level: 0
+  # If set to true, the blobs will be stored on a single folder with a hash as filename
+  # otherwise, the original full path will be preserved
+  # It is recommended to set this to true if using encryption, otherwise the directory structure
+  # and filenames will be visible
+  use_hash_as_filename: false
 
 # Same settings as primary, but allows to specify multiple replicas
 # Write operations will be performed on all replicas, but read operations will be performed on the primary only
 # This can be useful to have copies of the data in different locations/backends
 replicas: [ ]
-
-# Required if [storage_backend] is filesystem.
-# Path where to store the blobs, must already exist and be a directory.
-blob_storage: ./blob
-
-# Required if [storage_backend] is S3.
-# S3 bucket name
-s3_bucket: my-bucket
-
-# S3 region, ignored if [s3_endpoint_url] is not empty
-s3_region: localhost
-
-# S3 endpoint URL, for providers other than AWS, like https://min.io/
-s3_endpoint_url: 'http://localhost:9000'
-
-# S3 access key
-s3_access_key: '********************'
-
-# S3 secret key
-s3_secret_key: '****************************************'
-
-# If set, all blobs will be encrypted using AES-256-GCM, the key will unique for each blob
-# and derived from this value using PBKDF2-HMAC-SHA256 and salt
-encryption_key: ''
-
-# Values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
-# Automatically disabled if [encryption_key] is set
-compression_level: 0
-
-# If set to true, the blobs will be stored on a single folder with a hash as filename
-# otherwise, the original full path will be preserved
-# It is recommended to set this to true if using encryption, otherwise the directory structure
-# and filenames will be visible
-use_hash_as_filename: false
 
 # If set to true, the last access time of files will be tracked and stored in the database
 # It is recommended to keep this disabled to improve performance, if you don't need this feature
@@ -75,5 +55,16 @@ update_access_time: false
 # Keep file change history
 # To slightly improve performance, you can disable this feature
 store_file_change_history: true
+
+### Default values for primary/replicas fields
+blob_storage: ./blob
+s3_bucket: my-bucket
+s3_region: localhost
+s3_endpoint_url: 'http://127.0.0.1:9000'
+s3_access_key: '********************'
+s3_secret_key: '****************************************'
+encryption_key: ''
+compression_level: 0
+use_hash_as_filename: false
 
 ########################################################################################################################

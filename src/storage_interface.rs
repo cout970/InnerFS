@@ -169,6 +169,7 @@ impl Storage for StorageInterface {
 
                 // Update file metadata
                 file.encryption_key = info.encryption_key;
+                file.compression = info.compression;
                 file.size = row.content.len() as i64;
                 file.updated_at = current_timestamp();
                 modified = true;

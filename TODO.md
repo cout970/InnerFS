@@ -17,6 +17,7 @@
 - [x] Add multiple storage point for replication (primary replicas)
 - [x] Stats sub command
 - [x] Support RocksDB
+- [x] Store compression algorithm and settings in the index to support mixed compression algorithms
 - [ ] Verify integrity of files, check sha512 and size
 - Test if is posible to run operations in an async context
 - Implement methods from the newest FUSE ABI
@@ -24,7 +25,6 @@
 - Import index from json/yaml, maybe?
 - Generate index from existing folder
 - Add option to change the encryption key
-- Store compression algorithm and settings in the index to support mixed compression algorithms 
 - Sync between machines/instances
 - Sync with folder, like rsync
 - Encryption of index.db

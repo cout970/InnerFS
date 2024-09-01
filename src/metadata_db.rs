@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use anyhow::anyhow;
+use log::info;
 use sqlite::{Bindable, State, Statement};
-use crate::AnyError;
+use crate::{AnyError, VERSION};
 use crate::fs_tree::{FsTree, FsTreeRef};
 
 pub struct MetadataDB {
@@ -28,6 +29,7 @@ pub struct FileRow {
     pub size: i64,
     pub sha512: String,
     pub encryption_key: String,
+    pub compression: String,
     pub accessed_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -56,39 +58,50 @@ impl MetadataDB {
     pub fn open(database_file: &str) -> MetadataDB {
         let connection = sqlite::open(database_file).expect("Unable to open database");
 
-        let seed = include_str!("./seed.sql");
-        connection.execute(seed).unwrap();
-
         MetadataDB { connection }
     }
 
     pub fn run_migrations(&self) -> Result<(), AnyError> {
-        let sql = "SELECT version FROM migrations ORDER BY id DESC";
-        #[allow(clippy::unnecessary_cast)]
-        let versions = self.get_rows(sql, NO_BINDINGS.as_ref(), |stm| {
-            Ok(stm.read::<String, _>("version")?)
-        })?;
+        self.connection.execute(include_str!("./sql/init.sql"))?;
+        self.connection.execute(include_str!("./sql/migrations.sql"))?;
+        self.connection.execute(include_str!("./sql/persistent_settings.sql"))?;
+        self.connection.execute(include_str!("./sql/files.sql"))?;
+        self.connection.execute(include_str!("./sql/directory_entries.sql"))?;
+        self.connection.execute(include_str!("./sql/file_changes.sql"))?;
+        self.connection.execute(include_str!("./sql/sqlar.sql"))?;
 
-        if !versions.contains(&"1.0.0".to_string()) {
-            panic!("Incorrect migrations table, please re-create the database");
-        }
+        // Schema version
+        let version = self.get_row(
+            "SELECT version FROM migrations ORDER BY id DESC LIMIT 1",
+            NO_BINDINGS.as_ref(),
+            |stm| {
+                Ok(stm.read::<String, _>("version")?)
+            },
+        )?;
 
-        if !versions.contains(&"1.0.1".to_string()) {
+        let mut version = match version {
+            Some(v) => v,
+            None => {
+                // Initial setup from empty database
+                info!("Initializing database for first time");
+                self.connection.execute(include_str!("./sql/create_root_file.sql"))?;
+                self.execute1("INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))", (":version", VERSION))?;
+                return Ok(());
+            }
+        };
+
+        if &version == "1.0.1" {
+            info!("Running migration from version: '1.0.1' to '1.0.2'");
             // New version column, or ignore error if it already exists
             let _ = self.connection.execute("ALTER TABLE files ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
-
-            // Mark migration as complete
-            self.connection.execute("INSERT INTO migrations (version, created_at) VALUES ('1.0.1', unixepoch('now'))")?;
-        }
-
-        if !versions.contains(&"1.0.2".to_string()) {
-            // Rename column
+            let _ = self.connection.execute("ALTER TABLE files ADD COLUMN compression TEXT NOT NULL DEFAULT ''");
             let _ = self.connection.execute("ALTER TABLE file_changes RENAME COLUMN file_sha512 file_hash TEXT NOT NULL");
-
-            // Mark migration as complete
-            self.connection.execute("INSERT INTO migrations (version, created_at) VALUES ('1.0.2', unixepoch('now'))")?;
+            let _ = self.connection.execute("ALTER TABLE directory_entry RENAME TO directory_entries");
+            version = "1.0.2".to_string();
+            self.execute1("INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))", (":version", VERSION))?;
         }
 
+        info!("Database is up to date at version: {}", version);
         Ok(())
     }
 
@@ -107,9 +120,9 @@ impl MetadataDB {
     }
 
     pub fn add_file(&self, file: &FileRow) -> Result<i64, AnyError> {
-        self.execute12(
-            "INSERT INTO files (version, kind, name, uid, gid, perms, size, sha512, encryption_key, accessed_at, created_at, updated_at) \
-            VALUES (:version, :kind, :name, :uid, :gid, :perms, :size, :sha512, :encryption_key, :accessed_at, :created_at, :updated_at)",
+        self.execute13(
+            "INSERT INTO files (version, kind, name, uid, gid, perms, size, sha512, encryption_key, compression, accessed_at, created_at, updated_at) \
+            VALUES (:version, :kind, :name, :uid, :gid, :perms, :size, :sha512, :encryption_key, :compression, :accessed_at, :created_at, :updated_at)",
             (":version", 1),
             (":kind", file.kind),
             (":name", file.name.as_str()),
@@ -119,6 +132,7 @@ impl MetadataDB {
             (":size", file.size),
             (":sha512", file.sha512.as_str()),
             (":encryption_key", file.encryption_key.as_str()),
+            (":compression", file.compression.as_str()),
             (":accessed_at", file.accessed_at),
             (":created_at", file.created_at),
             (":updated_at", file.updated_at),
@@ -144,6 +158,7 @@ impl MetadataDB {
                     size: row.read("size")?,
                     sha512: row.read("sha512")?,
                     encryption_key: row.read("encryption_key")?,
+                    compression: row.read("compression")?,
                     accessed_at: row.read("accessed_at")?,
                     created_at: row.read("created_at")?,
                     updated_at: row.read("updated_at")?,
@@ -167,6 +182,7 @@ impl MetadataDB {
                     size: row.read("size")?,
                     sha512: row.read("sha512")?,
                     encryption_key: row.read("encryption_key")?,
+                    compression: row.read("compression")?,
                     accessed_at: row.read("accessed_at")?,
                     created_at: row.read("created_at")?,
                     updated_at: row.read("updated_at")?,
@@ -196,8 +212,12 @@ impl MetadataDB {
     }
 
     pub fn update_file(&self, file: &FileRow) -> Result<(), AnyError> {
-        self.execute12(
-            "UPDATE files SET version = version + 1, kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, sha512 = :sha512, encryption_key = :encryption_key, accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at WHERE id = :id",
+        self.execute13(
+            "UPDATE files SET version = version + 1, \
+            kind = :kind, name = :name, uid = :uid, gid = :gid, perms = :perms, size = :size, \
+            sha512 = :sha512, encryption_key = :encryption_key, compression = :compression, \
+            accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at \
+            WHERE id = :id",
             (":kind", file.kind),
             (":name", file.name.as_str()),
             (":uid", file.uid),
@@ -206,6 +226,7 @@ impl MetadataDB {
             (":size", file.size),
             (":sha512", file.sha512.as_str()),
             (":encryption_key", file.encryption_key.as_str()),
+            (":compression", file.compression.as_str()),
             (":accessed_at", file.accessed_at),
             (":created_at", file.created_at),
             (":updated_at", file.updated_at),
@@ -236,18 +257,18 @@ impl MetadataDB {
 
     pub fn remove_file(&self, id: i64) -> Result<(), AnyError> {
         self.execute1("DELETE FROM files WHERE id = :id", (":id", id))?;
-        self.execute1("DELETE FROM directory_entry WHERE entry_file_id = :id OR directory_file_id = :id", (":id", id))?;
+        self.execute1("DELETE FROM directory_entries WHERE entry_file_id = :id OR directory_file_id = :id", (":id", id))?;
         Ok(())
     }
 
     pub fn remove_directory_entry(&self, entry_id: i64) -> Result<(), AnyError> {
-        self.execute1("DELETE FROM directory_entry WHERE id = :id", (":id", entry_id))?;
+        self.execute1("DELETE FROM directory_entries WHERE id = :id", (":id", entry_id))?;
         Ok(())
     }
 
     pub fn find_directory_entry(&self, directory_file_id: i64, name: &str) -> Result<Option<DirectoryEntry>, AnyError> {
         self.get_row(
-            "SELECT * FROM directory_entry WHERE directory_file_id = :directory_file_id and name = :name",
+            "SELECT * FROM directory_entries WHERE directory_file_id = :directory_file_id and name = :name",
             &[(":directory_file_id", directory_file_id.to_string().as_str()), (":name", name)][..],
             |row| {
                 Ok(DirectoryEntry {
@@ -262,7 +283,7 @@ impl MetadataDB {
 
     pub fn find_parent_directory(&self, file_id: i64) -> Result<Option<i64>, AnyError> {
         self.get_row(
-            "SELECT directory_file_id FROM directory_entry WHERE entry_file_id = :file_id and name <> '.' and name <> '..'",
+            "SELECT directory_file_id FROM directory_entries WHERE entry_file_id = :file_id and name <> '.' and name <> '..'",
             &[(":file_id", file_id)][..],
             |row| {
                 Ok(row.read::<i64, _>("directory_file_id")?)
@@ -306,7 +327,7 @@ impl MetadataDB {
     pub fn get_directory_entries(&self, directory_file_id: i64, limit: i64, offset: i64) -> Result<Vec<DirectoryEntry>, AnyError> {
         let query = "\
             SELECT * \
-            FROM directory_entry \
+            FROM directory_entries \
             WHERE directory_file_id = :directory_file_id \
             LIMIT :limit \
             OFFSET :offset";
@@ -331,7 +352,7 @@ impl MetadataDB {
 
     pub fn update_directory_entry(&self, entry: &DirectoryEntry) -> Result<(), AnyError> {
         self.execute5(
-            "UPDATE directory_entry SET directory_file_id = :directory_file_id, entry_file_id = :entry_file_id, name = :name, kind = :kind WHERE id = :id",
+            "UPDATE directory_entries SET directory_file_id = :directory_file_id, entry_file_id = :entry_file_id, name = :name, kind = :kind WHERE id = :id",
             (":directory_file_id", entry.directory_file_id),
             (":entry_file_id", entry.entry_file_id),
             (":name", entry.name.as_str()),
@@ -347,7 +368,7 @@ impl MetadataDB {
 
     pub fn add_directory_entry(&self, entry: &DirectoryEntry) -> Result<i64, AnyError> {
         self.execute4(
-            "INSERT INTO directory_entry (directory_file_id, entry_file_id, name, kind) \
+            "INSERT INTO directory_entries (directory_file_id, entry_file_id, name, kind) \
             VALUES (:directory_file_id, :entry_file_id, :name, :kind)",
             (":directory_file_id", entry.directory_file_id),
             (":entry_file_id", entry.entry_file_id),
@@ -383,7 +404,7 @@ impl MetadataDB {
     pub fn get_tree(&self) -> Result<FsTreeRef, AnyError> {
         #[allow(clippy::unnecessary_cast)]
         let entries: Vec<DirectoryEntry> = self.get_rows(
-            "SELECT * FROM directory_entry",
+            "SELECT * FROM directory_entries",
             NO_BINDINGS.as_ref(),
             |row| {
                 Ok(DirectoryEntry {
@@ -444,7 +465,7 @@ impl MetadataDB {
     }
 
     pub fn nuke(&self) -> Result<(), AnyError> {
-        self.execute0("DELETE FROM directory_entry")?;
+        self.execute0("DELETE FROM directory_entries")?;
         self.execute0("DELETE FROM files")?;
         self.execute0("DELETE FROM file_changes")?;
         self.execute0("DELETE FROM migrations")?;
@@ -915,6 +936,7 @@ impl FileRow {
         hash.update(&self.size.to_string());
         hash.update(&self.sha512);
         hash.update(&self.encryption_key);
+        hash.update(&self.compression);
         hash.update(&self.created_at.to_string());
         hash.update(&self.updated_at.to_string());
         hex::encode(hash.finalize())
