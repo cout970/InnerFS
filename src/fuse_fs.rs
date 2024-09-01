@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
-
-use fuse::{FileAttr, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyStatfs, ReplyWrite, Request};
+use std::time::{Duration, SystemTime};
+use cntr_fuse::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyRead, ReplyStatfs, ReplyWrite, Request, UtimeSpec};
 use libc::{c_int, ENOENT, ENOSYS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY};
 use log::{error, trace, warn};
-use time::{Timespec};
 
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::sql_fs::SqlFileSystem;
+use crate::utils::{current_timestamp, system_time_from_timestamp, timestamp_from_system_time};
 
 const BLOCK_SIZE: u32 = 65536; // 64kb
 const FINE_LOGGING: bool = false;
@@ -90,8 +90,8 @@ impl FuseFileSystem {
         }
     }
 
-    pub fn get_ttl(&self) -> Timespec {
-        Timespec::new(1, 0)
+    pub fn get_ttl(&self) -> Duration {
+        Duration::from_secs(1)
     }
 }
 
@@ -121,7 +121,9 @@ impl Filesystem for FuseFileSystem {
                 }
             }
             Err(e) => {
-                warn!("Error looking up file: {:?}", e.error);
+                if e.code != ENOENT {
+                    warn!("Error looking up file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -138,27 +140,43 @@ impl Filesystem for FuseFileSystem {
                 reply.attr(&self.get_ttl(), &attr);
             }
             Err(e) => {
-                error!("Error looking up file: {:?}", e.error);
+                if e.code != ENOENT {
+                    error!("Error getattr: {:#}", e.error);
+                }
                 reply.error(e.code);
             }
         }
     }
 
-    fn setattr(&mut self, _req: &Request, ino: u64, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, size: Option<u64>, atime: Option<Timespec>, mtime: Option<Timespec>, fh: Option<u64>, crtime: Option<Timespec>, chgtime: Option<Timespec>, bkuptime: Option<Timespec>, flags: Option<u32>, reply: ReplyAttr) {
+    fn setattr(&mut self, _req: &Request, ino: u64, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, size: Option<u64>, atime: UtimeSpec, mtime: UtimeSpec, fh: Option<u64>, crtime: Option<SystemTime>, chgtime: Option<SystemTime>, bkuptime: Option<SystemTime>, flags: Option<u32>, reply: ReplyAttr) {
         trace!("FS setattr(ino: {}, mode: {:?}, uid: {:?}, gid: {:?}, size: {:?}, atime: {:?}, mtime: {:?}, fh: {:?}, crtime: {:?}, chgtime: {:?}, bkuptime: {:?}, flags: {:?})", ino, mode, uid, gid, size, atime, mtime, fh, crtime, chgtime, bkuptime, flags);
+
+        let atime = match atime {
+            UtimeSpec::Now => Some(current_timestamp()),
+            UtimeSpec::Omit => None,
+            UtimeSpec::Time(t) => Some(timestamp_from_system_time(t))
+        };
+
+        let mtime = match mtime {
+            UtimeSpec::Now => Some(current_timestamp()),
+            UtimeSpec::Omit => None,
+            UtimeSpec::Time(t) => Some(timestamp_from_system_time(t))
+        };
 
         match self.fs.setattr(
             ino as i64, mode, uid, gid, size,
-            atime.map(|i| i.sec),
-            mtime.map(|i| i.sec),
-            crtime.map(|i| i.sec),
+            atime,
+            mtime,
+            crtime.map(|i| timestamp_from_system_time(i)),
         ) {
             Ok(file) => {
                 let attr = FileAttr::from(&file);
                 reply.attr(&self.get_ttl(), &attr);
             }
             Err(e) => {
-                error!("Error looking up file: {:?}", e.error);
+                if e.code != ENOENT {
+                    error!("Error setattr: {:#}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -170,8 +188,8 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn mknod(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _rdev: u32, reply: ReplyEntry) {
-        trace!("FS mknod(parent: {}, name: {:?}, mode: {}, rdev: {})", parent, name, mode, _rdev);
+    fn mknod(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, _rdev: u32, reply: ReplyEntry) {
+        trace!("FS mknod(parent: {}, name: {:?}, mode: {}, umask: {}, rdev: {})", parent, name, mode, _umask, _rdev);
         let name = name.to_string_lossy();
         match self.fs.mknod(parent as i64, &name, req.uid(), req.gid(), mode) {
             Ok(file) => {
@@ -185,8 +203,8 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn mkdir(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, reply: ReplyEntry) {
-        trace!("FS mkdir(parent: {}, name: {:?}, mode: {})", parent, name, mode);
+    fn mkdir(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
+        trace!("FS mkdir(parent: {}, name: {:?}, mode: {}, umask: {})", parent, name, mode, _umask);
         let name = name.to_string_lossy();
         match self.fs.mkdir(parent as i64, &name, req.uid(), req.gid(), mode) {
             Ok(file) => {
@@ -208,7 +226,9 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                error!("Error unlinking file: {:?}", e.error);
+                if e.code != ENOENT {
+                    error!("Error unlinking file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -222,7 +242,9 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                error!("Error removing directory: {:?}", e.error);
+                if e.code != ENOENT {
+                    error!("Error removing directory: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -305,20 +327,22 @@ impl Filesystem for FuseFileSystem {
                 reply.opened(fh, flags);
             }
             Err(e) => {
-                error!("Error opening file: {:?}", e.error);
+                if e.code != ENOENT {
+                    error!("Error opening file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
     }
 
-    fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyData) {
+    fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyRead) {
         trace!("FS read(ino: {}, file_handle: {}, offset: {}, size: {})", ino, fh, offset, size);
         match self.fs.read(ino as i64, offset, size as usize) {
             Ok(data) => {
                 reply.data(&data);
             }
             Err(e) => {
-                error!("Error reading file: {:?}", e.error);
+                    error!("Error reading file: {:?}", e.error);
                 reply.error(e.code);
             }
         }
@@ -337,9 +361,17 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        trace!("FS flush(ino: {}, file_handle: {})", _ino, _fh);
-        reply.ok();
+    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        trace!("FS flush(ino: {}, file_handle: {})", ino, _fh);
+        match self.fs.flush(ino as i64) {
+            Ok(_) => {
+                reply.ok();
+            }
+            Err(e) => {
+                error!("Error flushing file: {:?}", e.error);
+                reply.error(e.code);
+            }
+        }
     }
 
     fn release(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {
@@ -379,7 +411,7 @@ impl Filesystem for FuseFileSystem {
             Ok(entries) => {
                 let mut index = offset + 1;
                 for e in entries {
-                    let fuse_kind = if e.kind == FILE_KIND_DIRECTORY { fuse::FileType::Directory } else { fuse::FileType::RegularFile };
+                    let fuse_kind = if e.kind == FILE_KIND_DIRECTORY { FileType::Directory } else { FileType::RegularFile };
                     let ino = e.entry_file_id as u64;
                     if reply.add(ino, index, fuse_kind, e.name) {
                         break;
@@ -430,8 +462,8 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn create(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, flags: u32, reply: ReplyCreate) {
-        trace!("FS create(parent: {}, name: {:?}, mode: {}, flags: {})", parent, name, mode, flags);
+    fn create(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: u32, reply: ReplyCreate) {
+        trace!("FS create(parent: {}, name: {:?}, mode: {}, umask: {}, flags: {})", parent, name, mode, _umask, flags);
 
         let open_flags = OpenFlags::from(flags as i32);
         let flags = open_flags.to_safe_flags() as u32;
@@ -467,7 +499,7 @@ impl Filesystem for FuseFileSystem {
                 self.open_files.insert(fh, file.id as u64);
 
                 let attr = FileAttr::from(&file);
-                reply.created(&attr.crtime, &attr, 0, fh, flags);
+                reply.created(&self.get_ttl(), &attr, 0, fh, flags);
             }
             Err(e) => {
                 error!("Error opening file: {:?}", e.error);
@@ -501,11 +533,11 @@ impl From<&FileRow> for FileAttr {
             ino: value.id as u64,
             size: value.size as u64,
             blocks: value.size as u64 / BLOCK_SIZE as u64,
-            atime: Timespec::new(value.accessed_at, 0i32),
-            mtime: Timespec::new(value.updated_at, 0i32),
-            ctime: Timespec::new(value.updated_at, 0i32),
-            crtime: Timespec::new(value.created_at, 0i32),
-            kind: if value.kind == 1 { fuse::FileType::Directory } else { fuse::FileType::RegularFile },
+            atime: system_time_from_timestamp(value.accessed_at),
+            mtime: system_time_from_timestamp(value.updated_at),
+            ctime: system_time_from_timestamp(value.updated_at),
+            crtime: system_time_from_timestamp(value.created_at),
+            kind: if value.kind == 1 { FileType::Directory } else { FileType::RegularFile },
             perm: value.perms as u16,
             nlink: if value.kind == 1 { 2 } else { 1 },
             uid: value.uid as u32,

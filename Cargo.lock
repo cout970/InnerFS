@@ -14,15 +14,15 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "clap",
+ "cntr-fuse",
  "env_logger",
  "flate2",
- "fuse",
  "hex",
  "hmac-sha512",
  "http 1.1.0",
  "itertools 0.13.0",
  "libc",
- "log 0.4.22",
+ "log",
  "pbkdf2",
  "rocksdb",
  "serde",
@@ -778,6 +778,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
+name = "cntr-fuse"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "410f62ca0589beaac5b106ae38765273b5aabc5bb23cc0bc553ed24e1c4d66ae"
+dependencies = [
+ "cntr-fuse-abi",
+ "cntr-fuse-sys",
+ "libc",
+ "log",
+]
+
+[[package]]
+name = "cntr-fuse-abi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea6ecd4a8a57b0262d82c7521f498ecc01f60888091b1eb3b3c70ccafd2a25d"
+
+[[package]]
+name = "cntr-fuse-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfb0da5a62f5c9c384041af4d81ab52c19b0064663d0b5b6626393af20c224f9"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1003,7 +1030,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f2c92ceda6ceec50f43169f9ee8424fe2db276791afde7b2cd8bc084cb376ab"
 dependencies = [
- "log 0.4.22",
+ "log",
  "regex",
 ]
 
@@ -1017,7 +1044,7 @@ dependencies = [
  "anstyle",
  "env_filter",
  "humantime",
- "log 0.4.22",
+ "log",
 ]
 
 [[package]]
@@ -1087,19 +1114,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "fuse"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80e57070510966bfef93662a81cb8aa2b1c7db0964354fa9921434f04b9e8660"
-dependencies = [
- "libc",
- "log 0.3.9",
- "pkg-config",
- "thread-scoped",
- "time 0.1.45",
 ]
 
 [[package]]
@@ -1364,7 +1378,7 @@ dependencies = [
  "futures-util",
  "http 0.2.12",
  "hyper",
- "log 0.4.22",
+ "log",
  "rustls",
  "rustls-native-certs",
  "tokio",
@@ -1522,15 +1536,6 @@ name = "lockfree-object-pool"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9374ef4228402d4b7e403e5838cb880d9ee663314b0a900d5a6aabf0c213552e"
-
-[[package]]
-name = "log"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e19e8d5c34a3e0e2223db8e060f9e8264aeeb5c5fc64a4ee9965c062211c024b"
-dependencies = [
- "log 0.4.22",
-]
 
 [[package]]
 name = "log"
@@ -1948,7 +1953,7 @@ version = "0.21.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f56a14d1f48b391359b22f731fd4bd7e43c97f3c50eee276f3aa09c94784d3e"
 dependencies = [
- "log 0.4.22",
+ "log",
  "ring",
  "rustls-webpki",
  "sct",
@@ -2094,7 +2099,7 @@ dependencies = [
  "indexmap",
  "itoa",
  "libyml",
- "log 0.4.22",
+ "log",
  "memchr",
  "ryu",
  "serde",
@@ -2294,12 +2299,6 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[package]]
-name = "thread-scoped"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcbb6aa301e5d3b0b5ef639c9a9c7e2f1c944f177b460c04dc24c69b1fa2bd99"
 
 [[package]]
 name = "time"
@@ -2750,7 +2749,7 @@ dependencies = [
  "bumpalo",
  "crc32fast",
  "lockfree-object-pool",
- "log 0.4.22",
+ "log",
  "once_cell",
  "simd-adler32",
 ]

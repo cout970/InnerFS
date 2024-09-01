@@ -592,6 +592,21 @@ impl SqlFileSystem {
         Ok(len)
     }
 
+    pub fn flush(&mut self, id: i64) -> Result<(), SqlFileSystemError> {
+        let mut file = self.get_file_or_err(id)?;
+        let modified = self.storage.flush(&mut file)?;
+
+        if modified {
+            self.sql.update_file(&file)?;
+
+            if self.config.store_file_change_history {
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn release(&mut self, id: i64) -> Result<(), SqlFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
         let modified = self.storage.close(&mut file)?;

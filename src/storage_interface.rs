@@ -136,7 +136,6 @@ impl Storage for StorageInterface {
     }
 
     fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
-
         let count = {
             let row = self.cache.get_mut(&file.id).ok_or_else(||
                 anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
@@ -146,38 +145,7 @@ impl Storage for StorageInterface {
             row.count
         };
 
-        fn aux(this: &mut StorageInterface, file: &mut FileRow) -> Result<bool, AnyError> {
-            let mut modified = false;
-            let row = this.cache.get_mut(&file.id).unwrap();
-
-            if row.modified {
-                // Shas of contents as id for the object
-                let sha512 = hex::encode(hmac_sha512::Hash::hash(&row.content));
-
-                // Remove old object
-                if !file.sha512.is_empty() && file.sha512 != sha512 {
-                    let info = ObjInfo::new(file, &row.full_path);
-                    this.pending_remove.insert(info);
-                }
-
-                file.sha512 = sha512;
-                let mut info = ObjInfo::new(file, &row.full_path);
-                info.size = row.content.len() as u64;
-
-                // Store new object
-                this.obj_storage.put(&mut info, &row.content)?;
-
-                // Update file metadata
-                file.encryption_key = info.encryption_key;
-                file.compression = info.compression;
-                file.size = row.content.len() as i64;
-                file.updated_at = current_timestamp();
-                modified = true;
-            }
-            Ok(modified)
-        }
-
-        match aux(self, file) {
+        match self.flush(file) {
             Ok(modified) => {
                 if count <= 0 {
                     self.cache.remove(&file.id);
@@ -192,6 +160,37 @@ impl Storage for StorageInterface {
                 Err(e)
             }
         }
+    }
+
+    fn flush(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
+        let mut modified = false;
+        let row = self.cache.get_mut(&file.id).unwrap();
+
+        if row.modified {
+            // Shas of contents as id for the object
+            let sha512 = hex::encode(hmac_sha512::Hash::hash(&row.content));
+
+            // Remove old object
+            if !file.sha512.is_empty() && file.sha512 != sha512 {
+                let info = ObjInfo::new(file, &row.full_path);
+                self.pending_remove.insert(info);
+            }
+
+            file.sha512 = sha512;
+            let mut info = ObjInfo::new(file, &row.full_path);
+            info.size = row.content.len() as u64;
+
+            // Store new object
+            self.obj_storage.put(&mut info, &row.content)?;
+
+            // Update file metadata
+            file.encryption_key = info.encryption_key;
+            file.compression = info.compression;
+            file.size = row.content.len() as i64;
+            file.updated_at = current_timestamp();
+            modified = true;
+        }
+        Ok(modified)
     }
 
     fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {

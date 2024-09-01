@@ -1,4 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::ops::{Add, Sub};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn humanize_bytes_binary(value: usize) -> String {
     use ::core::fmt::Write;
@@ -44,6 +45,18 @@ pub fn humanize_bytes_binary(value: usize) -> String {
 
 pub fn current_timestamp() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+pub fn system_time_from_timestamp(value: i64) -> SystemTime {
+    if value < 0 {
+        SystemTime::UNIX_EPOCH.sub(Duration::from_secs(value.abs() as u64))
+    } else {
+        SystemTime::UNIX_EPOCH.add(Duration::from_secs(value as u64))
+    }
+}
+
+pub fn timestamp_from_system_time(value: SystemTime) -> i64 {
+    value.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
 pub fn ask_for_confirmation(msg: &str) -> bool {

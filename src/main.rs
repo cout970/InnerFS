@@ -47,7 +47,7 @@ fn main() {
 
     // Init logger
     env_logger::Builder::from_env(Env::default())
-        .filter(Some("fuse"), log::LevelFilter::Info)
+        .filter(Some("cntr_fuse"), log::LevelFilter::Info)
         .filter(Some("InnerFS::proxy_fs"), if cli.debug { log::LevelFilter::Trace } else { log::LevelFilter::Info })
         .filter(Some("InnerFS"), if cli.debug { log::LevelFilter::Trace } else { log::LevelFilter::Info })
         .init();
@@ -164,7 +164,7 @@ fn mount(fs: SqlFileSystem) -> Result<(), AnyError> {
     });
 
     info!("Mounting filesystem at {}", &mount_point);
-    match fuse::mount(proxy, &mount_point, &[OsStr::new("noempty"), OsStr::new("default_permissions")]) {
+    match cntr_fuse::mount(proxy, &mount_point, &[OsStr::new("noempty"), OsStr::new("default_permissions")]) {
         Ok(_) => {}
         Err(e) => {
             error!("Unable to mount filesystem: {}", e);
