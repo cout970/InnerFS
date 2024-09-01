@@ -1,10 +1,15 @@
 use std::fmt::Display;
-use std::fs;
-use std::path::{PathBuf};
+use std::{env, fs};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use anyhow::{anyhow, Error};
+use log::error;
 use serde::{Deserialize, Serialize};
+use crate::AnyError;
+use crate::metadata_db::MetadataDB;
 use crate::obj_storage::ObjInfo;
+use crate::utils::ask_for_confirmation;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct YamlConfig {
@@ -76,7 +81,20 @@ pub struct StorageConfig {
     pub use_hash_as_filename: bool,
 }
 
+/// Read and parse the main config file
 pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
+    if fs::metadata(&config_path).is_err() {
+        let program_name = env::args().next()
+            .as_ref()
+            .map(Path::new)
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .map(String::from)
+            .unwrap();
+
+        return Err(anyhow!("Config file not found at {:?}, try './{} generate-config'", &config_path, program_name));
+    }
+
     let yaml_config = fs::read_to_string(config_path)
         .map_err(|e| anyhow!("Unable to read config file {:?}: {}", config_path, e))?;
 
@@ -177,6 +195,110 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
     }
 
     Ok(Rc::new(cfg))
+}
+
+pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> Result<(), AnyError> {
+    // Changing storage_option will make all the files not available
+    let setting_storage_option = format!("{}:storage_option", prefix);
+    let storage_option = config.storage_backend.to_string();
+    {
+        let setting = sql.get_setting(&setting_storage_option)?;
+        if let Some(setting) = setting {
+            if setting != storage_option {
+                error!("Storage option changed from {} to {}, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem", setting, storage_option);
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+    }
+    sql.set_setting(&setting_storage_option, &storage_option)?;
+
+    // Changing encryption_key will make every file not readable
+    let setting_encryption_key_hash = format!("{}:encryption_key_hash", prefix);
+    let encryption_key = hex::encode(&hmac_sha512::Hash::hash(&config.encryption_key)[0..32]);
+
+    if let Some(setting) = sql.get_setting(&setting_encryption_key_hash)? {
+        if setting != encryption_key {
+            error!("Encryption key changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                return Err(anyhow!("Operation cancelled"));
+            }
+        }
+    }
+    sql.set_setting(&setting_encryption_key_hash, &encryption_key)?;
+
+    // Changing use_hash_as_filename will cause in a mismatch between previous and new filenames
+    let setting_use_hash_as_filename = format!("{}:use_hash_as_filename", prefix);
+    let use_hash_as_filename = config.use_hash_as_filename.to_string();
+    {
+        let setting = sql.get_setting(&setting_use_hash_as_filename)?;
+        if let Some(setting) = setting {
+            if setting != use_hash_as_filename {
+                error!("use_hash_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+    }
+    sql.set_setting(&setting_use_hash_as_filename, &use_hash_as_filename)?;
+
+    // Changing s3 settings will make the data inaccesible
+    let setting_s3_bucket = format!("{}:s3_bucket", prefix);
+    let setting_s3_region = format!("{}:s3_region", prefix);
+    let setting_s3_endpoint_url = format!("{}:s3_endpoint_url", prefix);
+
+    if config.storage_backend == StorageOption::S3 {
+        let mut changed = false;
+
+        if let Some(bucket) = sql.get_setting(&setting_s3_bucket)? {
+            if bucket != config.s3_bucket {
+                changed = true;
+            }
+        }
+
+        if let Some(region) = sql.get_setting(&setting_s3_region)? {
+            if region != config.s3_region {
+                changed = true;
+            }
+        }
+
+        if let Some(endpoint_url) = sql.get_setting(&setting_s3_endpoint_url)? {
+            if endpoint_url != config.s3_endpoint_url {
+                changed = true;
+            }
+        }
+
+        if changed {
+            error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                return Err(anyhow!("Operation cancelled"));
+            }
+        }
+    }
+
+    sql.set_setting(&setting_s3_bucket, &config.s3_bucket)?;
+    sql.set_setting(&setting_s3_region, &config.s3_region)?;
+    sql.set_setting(&setting_s3_endpoint_url, &config.s3_endpoint_url)?;
+
+    // Changing blob_storage will make all the files not available
+    let blob_storage = format!("{}:blob_storage", prefix);
+
+    if config.storage_backend == StorageOption::FileSystem || config.storage_backend == StorageOption::RocksDb {
+        let setting = sql.get_setting(&blob_storage)?;
+        if let Some(setting) = setting {
+            if setting != config.blob_storage {
+                error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+    }
+    sql.set_setting(&blob_storage, &config.blob_storage)?;
+
+    Ok(())
 }
 
 fn validate_storage(cfg: &StorageConfig) -> Result<(), Error> {
