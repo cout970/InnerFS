@@ -1,16 +1,16 @@
 use crate::config::{StorageConfig, StorageOption};
-use crate::obj_storage::fs_object_storage::FsObjectStorage;
-use crate::obj_storage::s3_object_storage::S3ObjectStorage;
 use crate::metadata_db::{FileRow, MetadataDB};
+use crate::obj_storage::compressed_object_storage::CompressedObjectStorage;
+use crate::obj_storage::encrypted_object_storage::EncryptedObjectStorage;
+use crate::obj_storage::fs_object_storage::FsObjectStorage;
+use crate::obj_storage::rocks_db_object_storage::RocksDbObjectStorage;
+use crate::obj_storage::s3_object_storage::S3ObjectStorage;
+use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
+use crate::storage::ObjInUseFn;
+use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::Rc;
-use crate::AnyError;
-use crate::obj_storage::compressed_object_storage::CompressedObjectStorage;
-use crate::obj_storage::encrypted_object_storage::EncryptedObjectStorage;
-use crate::obj_storage::rocks_db_object_storage::RocksDbObjectStorage;
-use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
-use crate::storage::ObjInUseFn;
 
 // Storage backends
 pub mod fs_object_storage;

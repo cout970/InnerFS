@@ -18,8 +18,7 @@
 - [x] Stats sub command
 - [x] Support RocksDB
 - [x] Store compression algorithm and settings in the index to support mixed compression algorithms
-- [ ] Verify integrity of files, check sha512 and size
-- Test if is posible to run operations in an async context
+- [x] Verify integrity of files, check sha512 and size
 - Implement methods from the newest FUSE ABI
 - Add benchmarks showing the performance with different config parameters
 - Import index from json/yaml, maybe?

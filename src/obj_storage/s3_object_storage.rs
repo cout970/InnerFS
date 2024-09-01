@@ -1,16 +1,16 @@
-use std::rc::Rc;
-use anyhow::{anyhow, Error};
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client;
-use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
-use aws_sdk_s3::types::{Delete, ObjectIdentifier};
-use aws_types::region::Region;
-use log::{info};
-use tokio::runtime::{Builder, Runtime};
-use crate::AnyError;
-use crate::config::{StorageConfig};
-use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
+use crate::config::StorageConfig;
+use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
+use anyhow::{anyhow, Error};
+use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::Client;
+use aws_types::region::Region;
+use log::{debug};
+use std::rc::Rc;
+use tokio::runtime::{Builder, Runtime};
 
 pub struct S3ObjectStorage {
     pub config: Rc<StorageConfig>,
@@ -51,7 +51,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Get: {:?} ({:?})", &path, bucket_name);
+        debug!("Get: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
             let res = self.client
@@ -68,7 +68,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Put: {:?} ({:?})", &path, bucket_name);
+        debug!("Put: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -96,7 +96,7 @@ impl ObjectStorage for S3ObjectStorage {
 
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Remove: {:?} ({:?})", &path, bucket_name);
+        debug!("Remove: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -113,7 +113,7 @@ impl ObjectStorage for S3ObjectStorage {
         let prev_path = self.path(prev_info);
         let new_path = self.path(new_info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Rename: {:?} -> {:?} ({:?})", &prev_path, &new_path, bucket_name);
+        debug!("Rename: {:?} -> {:?} ({:?})", &prev_path, &new_path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -136,7 +136,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn nuke(&mut self) -> Result<(), Error> {
         let path = self.config.s3_base_path.trim_matches('/').to_string();
         let bucket_name = &self.config.s3_bucket;
-        info!("Nuke: {:?} ({:?})", &path, bucket_name);
+        debug!("Nuke: {:?} ({:?})", &path, bucket_name);
 
         // https://github.com/awslabs/aws-sdk-rust/blob/22f71f0e82804f709469f21bdd389f5d56cf8ed1/examples/examples/s3/src/s3-service-lib.rs#L31
         pub async fn delete_objects(client: &Client, bucket_name: &str, base_path: &str) -> Result<(), Error> {

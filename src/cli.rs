@@ -48,6 +48,8 @@ pub enum Commands {
     GenerateConfig,
     /// Print stats about the filesystem
     Stats,
+    /// Verify integrity of the filesystem data
+    Verify,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

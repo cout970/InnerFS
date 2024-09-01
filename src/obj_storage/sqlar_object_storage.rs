@@ -1,10 +1,10 @@
-use std::rc::Rc;
-use log::{info};
-use crate::AnyError;
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjectStorage, ObjInfo, UniquenessTest};
 use crate::metadata_db::MetadataDB;
+use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
+use log::{debug};
+use std::rc::Rc;
 
 pub struct SqlarObjectStorage {
     pub sql: Rc<MetadataDB>,
@@ -30,7 +30,7 @@ pub struct SqlarFile {
 
 impl ObjectStorage for SqlarObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
-        info!("Get: {}", info);
+        debug!("Get: {}", info);
         let name = self.path(&info);
         let file = self.get_sqlar_file(&name)?;
         if file.is_none() {
@@ -41,7 +41,7 @@ impl ObjectStorage for SqlarObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
         let name = self.path(&info);
-        info!("Create: {}", name);
+        debug!("Put: {}", name);
 
         let file = SqlarFile {
             name: name.clone(),
@@ -67,7 +67,7 @@ impl ObjectStorage for SqlarObjectStorage {
         }
 
         let name = self.path(&info);
-        info!("Remove: {}", name);
+        debug!("Remove: {}", name);
 
         self.remove_sqlar_file(&name)?;
         Ok(())
@@ -76,14 +76,14 @@ impl ObjectStorage for SqlarObjectStorage {
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
         let prev_name = self.path(&prev_info);
         let new_name = self.path(&new_info);
-        info!("Rename: {} -> {}", prev_name, new_name);
+        debug!("Rename: {} -> {}", prev_name, new_name);
 
         self.rename_sqlar_file(&prev_name, &new_name)?;
         Ok(())
     }
 
     fn nuke(&mut self) -> Result<(), AnyError> {
-        info!("Nuke");
+        debug!("Nuke");
         self.sql.execute0("DELETE FROM sqlar")?;
         Ok(())
     }

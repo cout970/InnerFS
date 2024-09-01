@@ -1,7 +1,7 @@
-use log::info;
-use crate::AnyError;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
+use log::info;
 
 pub struct DebugObjectStorage {}
 
@@ -12,7 +12,7 @@ impl ObjectStorage for DebugObjectStorage {
     }
 
     fn put(&mut self, info: &mut ObjInfo, _content: &[u8]) -> Result<(), AnyError> {
-        info!("Create: {}", info);
+        info!("Put: {}", info);
         Ok(())
     }
 

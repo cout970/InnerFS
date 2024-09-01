@@ -2,7 +2,7 @@ use crate::config::{check_config_changes, read_config};
 use crate::fuse_fs::FuseFileSystem;
 use crate::metadata_db::{MetadataDB, NO_BINDINGS};
 use crate::obj_storage::{create_object_storage, ObjectStorage};
-use anyhow::{Context};
+use anyhow::{anyhow, Context};
 use env_logger::Env;
 use fs::File;
 use log::{error, info, warn};
@@ -127,6 +127,7 @@ fn main() {
         Commands::ExportFiles { format, path } => export_files(fs, format, path).unwrap(),
         Commands::GenerateConfig => unreachable!(),
         Commands::Stats => stats(fs).unwrap(),
+        Commands::Verify => verify(fs).unwrap(),
     }
 }
 
@@ -381,5 +382,68 @@ fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
     });
 
     println!("{}", serde_json::to_string_pretty(&stats)?);
+    Ok(())
+}
+
+// Verify integrity of the filesystem contents
+fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
+    let total = fs.sql.get_row(
+        "
+        SELECT count(*)                      AS total
+        FROM files f LEFT JOIN directory_entries e ON e.entry_file_id = f.id
+        WHERE f.kind = 0 AND e.entry_file_id IS NULL",
+        NO_BINDINGS.as_ref(),
+        |row| Ok(row.read::<i64, _>("total")?),
+    )?.unwrap();
+
+    if total > 0 {
+        warn!("Found {} orphan files!", total);
+    } else {
+        info!("No orphan files found");
+    }
+
+    let tree = fs.sql.get_tree()?;
+
+    let mut verify_file = |child: &FsTree| -> Result<(), AnyError> {
+        let data = fs.read_all(child.id).context("Unable to read file")?;
+
+        if data.len() != child.size as usize {
+            return Err(anyhow!("Content size mismatch: stored: {} ({}), computed: {} ({})",
+                child.size, humanize_bytes_binary(child.size as usize), data.len(), humanize_bytes_binary(data.len())
+            ));
+        }
+
+        if data.len() != 0 || !child.sha512.is_empty() {
+            let sha512 = hex::encode(hmac_sha512::Hash::hash(&data));
+
+            if sha512 != child.sha512 {
+                return Err(anyhow!("Content hash mismatch: stored: '{}', computed: '{}'", &child.sha512[..32], &sha512[..32]));
+            }
+        }
+
+        Ok(())
+    };
+
+    let mut count = 0;
+    let mut errors = 0;
+
+    FsTree::for_each(tree, |child, child_path| {
+        if child.kind == FsTreeKind::Directory {
+            return Ok(());
+        }
+        if let Err(e) = verify_file(child) {
+            error!("Error verifying file ({}) {:?}:\n  {}", child.id, child_path, e);
+            errors += 1;
+        }
+        count += 1;
+        Ok(())
+    })?;
+
+    if errors > 0 {
+        error!("Found {} errors while verifying {} files", errors, count);
+    } else {
+        info!("All {} files verified, no errors found", count);
+    }
+
     Ok(())
 }

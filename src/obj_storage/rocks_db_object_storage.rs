@@ -1,10 +1,10 @@
-use std::rc::Rc;
-use log::info;
-use rocksdb::{DBWithThreadMode, Options, SingleThreaded, DB};
-use crate::AnyError;
 use crate::config::StorageConfig;
 use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
+use log::{debug};
+use rocksdb::{DBWithThreadMode, Options, SingleThreaded, DB};
+use std::rc::Rc;
 
 pub struct RocksDbObjectStorage {
     db: DBWithThreadMode<SingleThreaded>,
@@ -31,7 +31,7 @@ impl RocksDbObjectStorage {
 impl ObjectStorage for RocksDbObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
         let path = self.path(info);
-        info!("Get: {:?}", &path);
+        debug!("Get: {:?}", &path);
 
         match self.db.get(&path)? {
             Some(v) => Ok(v.to_vec()),
@@ -41,7 +41,7 @@ impl ObjectStorage for RocksDbObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
         let path = self.path(info);
-        info!("Put: {:?}", &path);
+        debug!("Put: {:?}", &path);
 
         self.db.put(&path, content)?;
         Ok(())
@@ -60,7 +60,7 @@ impl ObjectStorage for RocksDbObjectStorage {
             return Ok(());
         }
 
-        info!("Remove: {:?}", &path);
+        debug!("Remove: {:?}", &path);
 
         self.db.delete(&path)?;
         Ok(())
@@ -74,7 +74,7 @@ impl ObjectStorage for RocksDbObjectStorage {
             return Ok(());
         }
 
-        info!("Rename: {:?} -> {:?}", &prev_path, &new_path);
+        debug!("Rename: {:?} -> {:?}", &prev_path, &new_path);
 
         let content = self.db.get(&prev_path)?.unwrap();
         self.db.put(&new_path, &content)?;
@@ -83,6 +83,7 @@ impl ObjectStorage for RocksDbObjectStorage {
     }
 
     fn nuke(&mut self) -> Result<(), AnyError> {
+        debug!("Nuke");
         self.db.drop_cf("default")?;
         Ok(())
     }

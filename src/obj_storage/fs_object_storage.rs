@@ -1,12 +1,12 @@
-use std::fs;
-use std::path::PathBuf;
-use std::rc::Rc;
-use anyhow::{anyhow, Context};
-use log::{error, info};
-use crate::AnyError;
 use crate::config::StorageConfig;
 use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
+use anyhow::{anyhow, Context};
+use log::{debug, error};
+use std::fs;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 pub struct FsObjectStorage {
     pub base_path: PathBuf,
@@ -24,14 +24,14 @@ impl FsObjectStorage {
 impl ObjectStorage for FsObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
         let path = self.path(&info);
-        info!("Get: {:?}", &path);
+        debug!("Get: {:?}", &path);
 
         fs::read(&path).context("FS failed to read file")
     }
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
         let path = self.path(&info);
-        info!("Put: {:?}", &path);
+        debug!("Put: {:?}", &path);
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).context("FS failed to create dir")?;
@@ -52,7 +52,7 @@ impl ObjectStorage for FsObjectStorage {
             return Ok(());
         }
 
-        info!("Remove: {:?}", &path);
+        debug!("Remove: {:?}", &path);
 
         fs::remove_file(&path).map_err(|e| {
             anyhow!("FS failed to remove file '{:?}': {:?}", path, e)
@@ -72,7 +72,7 @@ impl ObjectStorage for FsObjectStorage {
             return Ok(());
         }
 
-        info!("Rename: {:?} -> {:?}", &prev_path, &new_path);
+        debug!("Rename: {:?} -> {:?}", &prev_path, &new_path);
 
         if let Some(parent) = new_path.parent() {
             fs::create_dir_all(parent).context("FS failed to create dir")?;
@@ -83,7 +83,7 @@ impl ObjectStorage for FsObjectStorage {
     }
 
     fn nuke(&mut self) -> Result<(), AnyError> {
-        info!("Nuke: {:?}", &self.base_path);
+        debug!("Nuke: {:?}", &self.base_path);
 
         for entry_res in fs::read_dir(&self.base_path)? {
             let entry = match entry_res {
