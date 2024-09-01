@@ -175,7 +175,7 @@ fn mount(fs: SqlFileSystem) -> Result<(), AnyError> {
         }
     }
 
-    info!("Folder was unmounted successfully, exiting");
+    info!("Directory was unmounted successfully, exiting");
     Ok(())
 }
 

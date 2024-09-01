@@ -37,7 +37,7 @@ primary:
   # Gzip compression, values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
   # Automatically disabled if [encryption_key] is set, not recommended for backends that already compress data, like RocksBD or S3
   compression_level: 0
-  # If set to true, the blobs will be stored on a single folder with a hash as filename
+  # If set to true, the blobs will be stored on a single directory with a hash as filename
   # otherwise, the original full path will be preserved
   # It is recommended to set this to true if using encryption, otherwise the directory structure
   # and filenames will be visible

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-use cntr_fuse::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyLock, ReplyOpen, ReplyRead, ReplyStatfs, ReplyWrite, Request, UtimeSpec};
+use cntr_fuse::{fuse_forget_one, FileAttr, FileType, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen, ReplyRead, ReplyStatfs, ReplyWrite, Request, UtimeSpec};
 use libc::{c_int, ENOENT, ENOSYS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY};
 use log::{error, trace, warn};
 
@@ -126,6 +126,18 @@ impl Filesystem for FuseFileSystem {
                 }
                 reply.error(e.code);
             }
+        }
+    }
+
+    fn forget(&mut self, _req: &Request<'_>, ino: u64, nlookup: u64) {
+        if FINE_LOGGING {
+            trace!("FS forget(ino: {}, nlookup: {})", ino, nlookup);
+        }
+    }
+
+    fn forget_multi(&mut self, _req: &Request<'_>, forget_data: &[fuse_forget_one]) {
+        if FINE_LOGGING {
+            trace!("FS forget_multi({:?})", forget_data);
         }
     }
 
@@ -307,6 +319,10 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
+    fn rename2(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
+        self.rename(_req, parent, name, newparent, newname, reply);
+    }
+
     fn link(&mut self, _req: &Request, _ino: u64, _newparent: u64, _newname: &OsStr, reply: ReplyEntry) {
         trace!("FS link(ino: {}, newparent: {}, newname: {:?})", _ino, _newparent, _newname);
         warn!("Link not implemented");
@@ -342,7 +358,7 @@ impl Filesystem for FuseFileSystem {
                 reply.data(&data);
             }
             Err(e) => {
-                    error!("Error reading file: {:?}", e.error);
+                error!("Error reading file: {:?}", e.error);
                 reply.error(e.code);
             }
         }
@@ -414,6 +430,33 @@ impl Filesystem for FuseFileSystem {
                     let fuse_kind = if e.kind == FILE_KIND_DIRECTORY { FileType::Directory } else { FileType::RegularFile };
                     let ino = e.entry_file_id as u64;
                     if reply.add(ino, index, fuse_kind, e.name) {
+                        break;
+                    }
+                    index += 1;
+                }
+                reply.ok();
+            }
+            Err(e) => {
+                error!("Error reading directory: {:?}", e.error);
+                reply.error(e.code);
+            }
+        }
+    }
+
+    fn readdirplus(&mut self, _req: &Request<'_>, ino: u64, fh: u64, offset: u64, mut reply: ReplyDirectoryPlus) {
+        if FINE_LOGGING {
+            trace!("FS readdirplus(ino: {}, file_handle: {}, offset: {})", ino, fh, offset);
+        }
+
+        match self.fs.readdir(ino as i64, offset as i64) {
+            Ok(entries) => {
+                let mut index = offset + 1;
+                for e in entries {
+                    let ino = e.entry_file_id as u64;
+                    let file = self.fs.get_file_or_err(e.entry_file_id).unwrap();
+                    let attr = FileAttr::from(&file);
+
+                    if reply.add(ino, index as i64, e.name, &self.get_ttl(), &attr, 0) {
                         break;
                     }
                     index += 1;
@@ -523,6 +566,24 @@ impl Filesystem for FuseFileSystem {
     fn bmap(&mut self, _req: &Request, _ino: u64, _blocksize: u32, _idx: u64, reply: ReplyBmap) {
         trace!("FS bmap(ino: {}, blocksize: {}, idx: {})", _ino, _blocksize, _idx);
         warn!("Bmap not implemented");
+        reply.error(ENOSYS);
+    }
+
+    fn ioctl(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _flags: u32, _cmd: u32, _in_data: Option<&[u8]>, _out_size: u32, reply: ReplyIoctl) {
+        trace!("FS ioctl(ino: {}, file_handle: {}, flags: {}, cmd: {}, in_data: {:?}, out_size: {})", _ino, _fh, _flags, _cmd, _in_data, _out_size);
+        warn!("Operation ioctl not implemented");
+        reply.error(ENOSYS);
+    }
+
+    fn fallocate(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _offset: u64, _length: u64, _mode: u32, reply: ReplyEmpty) {
+        trace!("FS fallocate(ino: {})", _ino);
+        warn!("Operation fallocate not implemented");
+        reply.error(ENOSYS);
+    }
+
+    fn lseek(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _offset: i64, _whence: u32, reply: ReplyLseek) {
+        trace!("FS lseek(ino: {}, file_handle: {}, offset: {}, whence: {})", _ino, _fh, _offset, _whence);
+        warn!("Operation lseek not implemented");
         reply.error(ENOSYS);
     }
 }
