@@ -5,7 +5,6 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_types::region::Region;
-use itertools::Itertools;
 use log::{info};
 use tokio::runtime::{Builder, Runtime};
 use crate::AnyError;
@@ -42,7 +41,9 @@ impl S3ObjectStorage {
 
     pub fn path(&self, info: &ObjInfo) -> String {
         let path = self.config.path_of(&info);
-        format!("{}/{}", self.config.s3_base_path.trim_matches('/'), &path)
+        let basename = self.config.s3_base_path.trim_end_matches('/');
+        let filename = path.trim_start_matches('/');
+        format!("{}/{}", basename, filename).trim_matches('/').to_string()
     }
 }
 
@@ -50,7 +51,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Get: {:?}", &path);
+        info!("Get: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
             let res = self.client
@@ -67,7 +68,7 @@ impl ObjectStorage for S3ObjectStorage {
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Create: {:?}", &path);
+        info!("Put: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -95,7 +96,7 @@ impl ObjectStorage for S3ObjectStorage {
 
         let path = self.path(info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Remove: {:?}", &path);
+        info!("Remove: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -112,7 +113,7 @@ impl ObjectStorage for S3ObjectStorage {
         let prev_path = self.path(prev_info);
         let new_path = self.path(new_info);
         let bucket_name = &self.config.s3_bucket;
-        info!("Rename: {:?} -> {:?}", &prev_path, &new_path);
+        info!("Rename: {:?} -> {:?} ({:?})", &prev_path, &new_path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -133,32 +134,39 @@ impl ObjectStorage for S3ObjectStorage {
     }
 
     fn nuke(&mut self) -> Result<(), Error> {
-        let path = self.config.s3_base_path.trim_end_matches('/').to_string() + "/";
+        let path = self.config.s3_base_path.trim_matches('/').to_string();
         let bucket_name = &self.config.s3_bucket;
-        info!("Remove: {:?}", &path);
+        info!("Nuke: {:?} ({:?})", &path, bucket_name);
 
         // https://github.com/awslabs/aws-sdk-rust/blob/22f71f0e82804f709469f21bdd389f5d56cf8ed1/examples/examples/s3/src/s3-service-lib.rs#L31
         pub async fn delete_objects(client: &Client, bucket_name: &str, base_path: &str) -> Result<(), Error> {
-            let objects = client.list_objects_v2()
-                .bucket(bucket_name)
-                .prefix(base_path)
-                .send()
-                .await?;
+            loop {
+                let objects = client.list_objects_v2()
+                    .bucket(bucket_name)
+                    .prefix(base_path)
+                    .max_keys(1000)
+                    .send()
+                    .await?;
 
-            let mut delete_objects: Vec<ObjectIdentifier> = vec![];
+                let key_count = objects.key_count().ok_or_else(|| anyhow!("Failed to get object count"))?;
 
-            for obj in objects.contents() {
-                let key = obj.key().unwrap().to_string();
+                if key_count == 0 {
+                    return Ok(());
+                }
 
-                let obj_id = ObjectIdentifier::builder()
-                    .set_key(Some(key))
-                    .build()
-                    .map_err(Error::from)?;
+                let mut delete_objects: Vec<ObjectIdentifier> = vec![];
 
-                delete_objects.push(obj_id);
-            }
+                for obj in objects.contents() {
+                    let key = obj.key().unwrap().to_string();
 
-            if !delete_objects.is_empty() {
+                    let obj_id = ObjectIdentifier::builder()
+                        .set_key(Some(key))
+                        .build()
+                        .map_err(Error::from)?;
+
+                    delete_objects.push(obj_id);
+                }
+
                 client.delete_objects()
                     .bucket(bucket_name)
                     .delete(
@@ -170,22 +178,6 @@ impl ObjectStorage for S3ObjectStorage {
                     .send()
                     .await?;
             }
-
-            let objects = client.list_objects_v2()
-                .bucket(bucket_name)
-                .prefix(base_path)
-                .send()
-                .await?;
-
-            if let Some(key_count) = objects.key_count() {
-                if key_count > 0i32 {
-                    let keys = objects.contents().iter().map(|obj| obj.key.as_ref().unwrap().to_string()).collect_vec();
-
-                    return Err(anyhow!("Failed to delete all objects, remaining: {:?}", keys));
-                }
-            }
-
-            Ok(())
         }
 
         self.rt.block_on(async {

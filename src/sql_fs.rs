@@ -7,7 +7,7 @@ use crate::AnyError;
 use crate::metadata_db::{DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
 use crate::storage::Storage;
 use anyhow::{anyhow, Context};
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, O_RDONLY, O_WRONLY};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, O_RDONLY, O_WRONLY};
 use crate::obj_storage::UniquenessTest;
 use crate::utils::current_timestamp;
 
@@ -381,6 +381,11 @@ impl SqlFileSystem {
     pub fn mknod(&mut self, parent: i64, name: &str, uid: u32, gid: u32, mode: u32) -> Result<FileRow, SqlFileSystemError> {
         if !self.is_validate_file_name(name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
+        }
+
+        let regular = mode & libc::S_IFREG != 0;
+        if !regular {
+            return error(ENOTSUP, anyhow!("Only regular files are supported in mknod: mode = {}", mode));
         }
 
         let parent_directory = self.get_file_or_err(parent)?;

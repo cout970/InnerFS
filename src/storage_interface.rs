@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use libc::{O_APPEND, O_RDONLY};
 use crate::AnyError;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::metadata_db::FileRow;
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::fuse_fs::OpenFlags;
 use crate::storage::{ObjInUseFn, Storage};
 use crate::utils::current_timestamp;
@@ -136,7 +136,7 @@ impl Storage for StorageInterface {
     }
 
     fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
-        let mut modified = false;
+
         let count = {
             let row = self.cache.get_mut(&file.id).ok_or_else(||
                 anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
@@ -146,8 +146,9 @@ impl Storage for StorageInterface {
             row.count
         };
 
-        {
-            let row = self.cache.get_mut(&file.id).unwrap();
+        fn aux(this: &mut StorageInterface, file: &mut FileRow) -> Result<bool, AnyError> {
+            let mut modified = false;
+            let row = this.cache.get_mut(&file.id).unwrap();
 
             if row.modified {
                 // Shas of contents as id for the object
@@ -156,7 +157,7 @@ impl Storage for StorageInterface {
                 // Remove old object
                 if !file.sha512.is_empty() && file.sha512 != sha512 {
                     let info = ObjInfo::new(file, &row.full_path);
-                    self.pending_remove.insert(info);
+                    this.pending_remove.insert(info);
                 }
 
                 file.sha512 = sha512;
@@ -164,7 +165,7 @@ impl Storage for StorageInterface {
                 info.size = row.content.len() as u64;
 
                 // Store new object
-                self.obj_storage.put(&mut info, &row.content)?;
+                this.obj_storage.put(&mut info, &row.content)?;
 
                 // Update file metadata
                 file.encryption_key = info.encryption_key;
@@ -172,12 +173,24 @@ impl Storage for StorageInterface {
                 file.updated_at = current_timestamp();
                 modified = true;
             }
+            Ok(modified)
         }
 
-        if count <= 0 {
-            self.cache.remove(&file.id);
+        match aux(self, file) {
+            Ok(modified) => {
+                if count <= 0 {
+                    self.cache.remove(&file.id);
+                }
+                Ok(modified)
+            }
+            Err(e) => {
+                // Clean up file even if there was an error
+                if count <= 0 {
+                    self.cache.remove(&file.id);
+                }
+                Err(e)
+            }
         }
-        Ok(modified)
     }
 
     fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
@@ -193,6 +206,11 @@ impl Storage for StorageInterface {
     fn rename(&mut self, file: &FileRow, prev_full_path: &str, new_full_path: &str) -> Result<(), AnyError> {
         if self.cache.contains_key(&file.id) {
             return Err(anyhow!("File is open, cannot rename"));
+        }
+
+        // Directories are not stored as objects
+        if file.kind == FILE_KIND_DIRECTORY {
+            return Ok(());
         }
 
         let prev_info = ObjInfo::new(file, prev_full_path);

@@ -46,7 +46,9 @@ pub fn current_timestamp() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-pub fn ask_for_confirmation() -> bool {
+pub fn ask_for_confirmation(msg: &str) -> bool {
+    println!("--------------------------------------------------------------------------------");
+    println!(" > {}", msg);
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let choice = input.trim().to_ascii_lowercase();

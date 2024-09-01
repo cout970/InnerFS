@@ -116,8 +116,8 @@ fn main() {
     // This needs to be done before the check for the config file
     if let Some(Commands::GenerateConfig) = &cli.command {
         if fs::metadata(&config_path).is_ok() {
-            warn!("Config file already exists at {:?}, Type 'yes' or 'y' to override this file", &config_path);
-            if !ask_for_confirmation() {
+            warn!("Config file already exists at {:?}", &config_path);
+            if !ask_for_confirmation("Type 'yes' or 'y' to override this file") {
                 info!("Operation cancelled");
                 return;
             }
@@ -221,7 +221,7 @@ fn mount(fs: SqlFileSystem) {
     thread::spawn(move || {
         // Wait for a SIGINT signal to unmount the filesystem
         for _ in signals.forever() {
-            println!("Received SIGINT, trying to unmount the filesystem");
+            info!("Received SIGINT, trying to unmount the filesystem");
             let _ = Command::new("umount").arg(&mount_point_copy).status();
 
             // Finish this thread
@@ -246,8 +246,8 @@ fn mount(fs: SqlFileSystem) {
 
 fn nuke(mut fs: SqlFileSystem, force: bool) {
     if !force {
-        warn!("Are you sure you want to delete all data? This operation is irreversible. Type 'yes' or 'y' to confirm");
-        if !ask_for_confirmation() {
+        warn!("Are you sure you want to delete all data?");
+        if !ask_for_confirmation("This operation is irreversible. Type 'yes' or 'y' to proceed") {
             info!("Operation cancelled");
             return;
         }
@@ -256,6 +256,9 @@ fn nuke(mut fs: SqlFileSystem, force: bool) {
     info!("Deleting all data");
     fs.sql.nuke().unwrap();
     fs.storage.nuke().unwrap();
+    let _ = fs::remove_file(PathBuf::from(&fs.config.database_file).with_extension("db-wal"));
+    let _ = fs::remove_file(PathBuf::from(&fs.config.database_file).with_extension("db-shm"));
+    let _ = fs::remove_file(PathBuf::from(&fs.config.database_file));
     info!("Done");
 }
 
@@ -444,86 +447,104 @@ fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
 
 pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> Result<(), AnyError> {
     // Changing storage_option will make all the files not available
+    let setting_storage_option = format!("{}:storage_option", prefix);
     let storage_option = config.storage_backend.to_string();
     {
-        let setting = sql.get_setting(&format!("{}:storage_option", prefix))?;
+        let setting = sql.get_setting(&setting_storage_option)?;
         if let Some(setting) = setting {
             if setting != storage_option {
                 error!("Storage option changed from {} to {}, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem", setting, storage_option);
-                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
-                if !ask_for_confirmation() {
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
         }
-        sql.set_setting(&format!("{}:storage_option", prefix), &storage_option)?;
     }
+    sql.set_setting(&setting_storage_option, &storage_option)?;
 
     // Changing encryption_key will make every file not readable
-    let encryption_key = hex::encode(hmac_sha512::Hash::hash(&config.encryption_key));
-    {
-        let setting = sql.get_setting(&format!("{}:encryption_key_sha512", prefix))?;
+    let setting_encryption_key_hash = format!("{}:encryption_key_hash", prefix);
+    let encryption_key = hex::encode(&hmac_sha512::Hash::hash(&config.encryption_key)[0..32]);
 
-        if let Some(setting) = setting {
-            if setting != encryption_key {
-                error!("Encryption key changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
-                if !ask_for_confirmation() {
-                    return Err(anyhow!("Operation cancelled"));
-                }
-            }
-        }
-        sql.set_setting(&format!("{}:encryption_key_sha512", prefix), &encryption_key)?;
-    }
-    // Changing use_hash_as_filename will cause in a mismatch between previous and new filenames
-    let use_hash_as_filename = config.use_hash_as_filename.to_string();
-    {
-        let setting = sql.get_setting(&format!("{}:use_hash_as_filename", prefix))?;
-        if let Some(setting) = setting {
-            if setting != use_hash_as_filename {
-                error!("use_hash_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
-                if !ask_for_confirmation() {
-                    return Err(anyhow!("Operation cancelled"));
-                }
-            }
-        }
-        sql.set_setting(&format!("{}:use_hash_as_filename", prefix), &use_hash_as_filename)?;
-    }
-
-    // s3_bucket/s3_region/s3_endpoint_url
-    if config.storage_backend == StorageOption::S3 {
-        let bucket = sql.get_setting(&format!("{}:s3_bucket", prefix))?.unwrap_or_else(|| "".to_string());
-        let region = sql.get_setting(&format!("{}:s3_region", prefix))?.unwrap_or_else(|| "".to_string());
-        let endpoint_url = sql.get_setting(&format!("{}:s3_endpoint_url", prefix))?.unwrap_or_else(|| "".to_string());
-
-        if bucket != config.s3_bucket || region != config.s3_region || endpoint_url != config.s3_endpoint_url {
-            error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
-            info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
-            if !ask_for_confirmation() {
+    if let Some(setting) = sql.get_setting(&setting_encryption_key_hash)? {
+        if setting != encryption_key {
+            error!("Encryption key changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                 return Err(anyhow!("Operation cancelled"));
             }
         }
-
-        sql.set_setting(&format!("{}:s3_bucket", prefix), &bucket)?;
-        sql.set_setting(&format!("{}:s3_region", prefix), &region)?;
-        sql.set_setting(&format!("{}:s3_endpoint_url", prefix), &endpoint_url)?;
     }
+    sql.set_setting(&setting_encryption_key_hash, &encryption_key)?;
 
-    // Changing blob_storage will make all the files not available
-    if config.storage_backend == StorageOption::FileSystem || config.storage_backend == StorageOption::RocksDb {
-        let setting = sql.get_setting(&format!("{}:blob_storage", prefix))?;
+    // Changing use_hash_as_filename will cause in a mismatch between previous and new filenames
+    let setting_use_hash_as_filename = format!("{}:use_hash_as_filename", prefix);
+    let use_hash_as_filename = config.use_hash_as_filename.to_string();
+    {
+        let setting = sql.get_setting(&setting_use_hash_as_filename)?;
         if let Some(setting) = setting {
-            if setting != config.blob_storage {
-                error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
-                info!("Do you want to proceed anyways? Type 'yes' or 'y' to confirm");
-                if !ask_for_confirmation() {
+            if setting != use_hash_as_filename {
+                error!("use_hash_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
         }
-        sql.set_setting(&format!("{}:blob_storage", prefix), &config.blob_storage)?;
     }
+    sql.set_setting(&setting_use_hash_as_filename, &use_hash_as_filename)?;
+
+    // Changing s3 settings will make the data inaccesible
+    let setting_s3_bucket = format!("{}:s3_bucket", prefix);
+    let setting_s3_region = format!("{}:s3_region", prefix);
+    let setting_s3_endpoint_url = format!("{}:s3_endpoint_url", prefix);
+
+    if config.storage_backend == StorageOption::S3 {
+        let mut changed = false;
+
+        if let Some(bucket) = sql.get_setting(&setting_s3_bucket)? {
+            if bucket != config.s3_bucket {
+                changed = true;
+            }
+        }
+
+        if let Some(region) = sql.get_setting(&setting_s3_region)? {
+            if region != config.s3_region {
+                changed = true;
+            }
+        }
+
+        if let Some(endpoint_url) = sql.get_setting(&setting_s3_endpoint_url)? {
+            if endpoint_url != config.s3_endpoint_url {
+                changed = true;
+            }
+        }
+
+        if changed {
+            error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                return Err(anyhow!("Operation cancelled"));
+            }
+        }
+    }
+
+    sql.set_setting(&setting_s3_bucket, &config.s3_bucket)?;
+    sql.set_setting(&setting_s3_region, &config.s3_region)?;
+    sql.set_setting(&setting_s3_endpoint_url, &config.s3_endpoint_url)?;
+
+    // Changing blob_storage will make all the files not available
+    let blob_storage = format!("{}:blob_storage", prefix);
+
+    if config.storage_backend == StorageOption::FileSystem || config.storage_backend == StorageOption::RocksDb {
+        let setting = sql.get_setting(&blob_storage)?;
+        if let Some(setting) = setting {
+            if setting != config.blob_storage {
+                error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                    return Err(anyhow!("Operation cancelled"));
+                }
+            }
+        }
+    }
+    sql.set_setting(&blob_storage, &config.blob_storage)?;
 
     Ok(())
 }

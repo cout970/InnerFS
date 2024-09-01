@@ -17,8 +17,7 @@
 - [x] Add multiple storage point for replication (primary replicas)
 - [x] Stats sub command
 - [x] Support RocksDB
-- Verify integrity of files, check sha512 and size
-- Add local cache to speed up remote reads like catfs
+- [ ] Verify integrity of files, check sha512 and size
 - Test if is posible to run operations in an async context
 - Implement methods from the newest FUSE ABI
 - Add benchmarks showing the performance with different config parameters
@@ -36,6 +35,3 @@
 - Mount .innerfs file with file explorer with double click, like any zip file
 
 ### Bugs
-- Rename directory contents
-- Support rename between directories
-- Nuke not removing folders from S3
