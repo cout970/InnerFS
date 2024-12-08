@@ -74,7 +74,13 @@ fn main() {
 
     info!("Starting v{}", VERSION);
 
-    let config = read_config(&config_path).expect("Unable to read config");
+    let config = match read_config(&config_path) {
+        Ok(config) => config,
+        Err(e) => {
+            error!("{}", e);
+            std::process::exit(-1);
+        }
+    };
     info!("Config loaded");
 
     let sql = Rc::new(MetadataDB::open(&config.database_file));
