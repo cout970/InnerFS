@@ -28,7 +28,7 @@ struct YamlConfig {
     s3_base_path: Option<String>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
-    encryption_key: Option<String>,
+    encryption_key: Option<YamlEncryptionKeyConfig>,
     compression_level: Option<u32>,
 }
 
@@ -43,10 +43,18 @@ pub struct YamlStorageConfig {
     s3_base_path: Option<String>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
-    encryption_key: Option<String>,
+    encryption_key: Option<YamlEncryptionKeyConfig>,
     compression_level: Option<u32>,
     use_hash_as_filename: Option<bool>,
     use_id_as_filename: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum YamlEncryptionKeyConfig {
+    Plain(String),
+    External { path: String },
+    Ask { ask: bool },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -161,6 +169,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
         encryption_key: primary
             .and_then(|p| p.encryption_key.clone())
             .or(config.encryption_key.clone())
+            .map(|value| extract_encryption_key(value))
             .unwrap_or("".to_string()),
         compression_level: primary
             .and_then(|p| p.compression_level.clone())
@@ -237,6 +246,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
                 .encryption_key
                 .clone()
                 .or(config.encryption_key.clone())
+                .map(|value| extract_encryption_key(value))
                 .unwrap_or("".to_string()),
             compression_level: replica
                 .compression_level
@@ -256,6 +266,22 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
     }
 
     Ok(Rc::new(cfg))
+}
+
+fn extract_encryption_key(value: YamlEncryptionKeyConfig) -> String {
+    match value {
+        YamlEncryptionKeyConfig::Plain(key) => key,
+        YamlEncryptionKeyConfig::External { path } => {
+            let contents = fs::read_to_string(&path).expect("Unable to read encryption key file");
+            contents.trim().to_string()
+        }
+        YamlEncryptionKeyConfig::Ask { ask } => {
+            if !ask {
+                panic!("Invalid encryption key configuration, set 'ask: true' to ask for the key at startup");
+            }
+            rpassword::prompt_password("Enter encryption key: ").unwrap()
+        }
+    }
 }
 
 pub fn check_config_changes(
