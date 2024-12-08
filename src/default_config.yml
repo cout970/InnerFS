@@ -39,9 +39,10 @@ primary:
   compression_level: 0
   # If set to true, the blobs will be stored on a single directory with a hash as filename
   # otherwise, the original full path will be preserved
-  # It is recommended to set this to true if using encryption, otherwise the directory structure
-  # and filenames will be visible
+  # Incompatible with encryption, use 'use_id_as_filename' instead
   use_hash_as_filename: false
+  # If the setting 'use_hash_as_filename' is false, will use the inode number as filename
+  use_id_as_filename: false
 
 # Same settings as primary, but allows to specify multiple replicas
 # Write operations will be performed on all replicas, but read operations will be performed on the primary only
