@@ -282,24 +282,26 @@ impl ObjectStorage for EncryptedObjectStorage {
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo, _is_in_use: ObjInUseFn) -> Result<(), Error> {
+    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), Error> {
         let keys = Self::get_keys_from_keychain(&info.encryption_key, &self.config.name)?;
 
         fn try_key(
             this: &mut EncryptedObjectStorage,
             info: &ObjInfo,
             key: FileKey,
+            is_in_use: ObjInUseFn,
         ) -> Result<(), Error> {
-            let mut info = info.clone();
-            info.full_path = this.path(&key, &info.full_path, info.id);
+            let original_info = info.clone();
+            let mut info_copy = info.clone();
+            info_copy.full_path = this.path(&key, &info_copy.full_path, info_copy.id);
 
-            this.fs.remove(&info, Rc::new(|_, _| Ok(false)))
+            this.fs.remove(&info_copy, Rc::new(move |_, pg| is_in_use(&original_info, pg)))
         }
 
         let mut last_error = None;
 
         for key in keys {
-            match try_key(self, info, key) {
+            match try_key(self, info, key, is_in_use.clone()) {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     last_error = Some(e);

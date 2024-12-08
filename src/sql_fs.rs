@@ -6,8 +6,8 @@ use crate::config::Config;
 use crate::metadata_db::{
     DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR,
 };
-use crate::obj_storage::PathGenerator;
-use crate::storage::Storage;
+use crate::obj_storage::{ObjInfo, PathGenerator};
+use crate::storage::{Storage};
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
@@ -750,15 +750,19 @@ impl SqlFileSystem {
 
     pub fn cleanup(&mut self) -> Result<(), SqlFileSystemError> {
         let sql = self.sql.clone();
-        self.storage.cleanup(Rc::new(move |info, test| {
-            let exists = match test {
-                PathGenerator::Path => sql.get_file_by_path(&info.full_path)?.is_some(),
-                PathGenerator::Sha512 => sql.get_file_by_sha512(&info.sha512)?.is_some(),
-                PathGenerator::Id => sql.get_file(info.id)?.is_some(),
-            };
-            Ok(exists)
-        }))?;
+        self.storage.cleanup(Rc::new(move |info, test|
+            Self::file_is_in_use(&sql, info, test)
+        ))?;
         Ok(())
+    }
+
+    fn file_is_in_use(sql: &Rc<MetadataDB>, info: &ObjInfo, test: PathGenerator) -> Result<bool, AnyError> {
+        let exists = match test {
+            PathGenerator::Path => sql.get_file_by_path(&info.full_path)?.is_some(),
+            PathGenerator::Sha512 => sql.get_file_by_sha512(&info.sha512)?.is_some(),
+            PathGenerator::Id => sql.get_file(info.id)?.is_some(),
+        };
+        Ok(exists)
     }
 
     pub fn get_file_or_err(&mut self, id: i64) -> Result<FileRow, SqlFileSystemError> {

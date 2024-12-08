@@ -1,5 +1,5 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
+use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
