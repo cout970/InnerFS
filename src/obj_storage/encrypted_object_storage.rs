@@ -6,7 +6,10 @@ use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Nonce, Payload};
-use aes_gcm::{aead::{Aead, AeadCore, KeyInit, OsRng}, Aes256Gcm};
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+    Aes256Gcm,
+};
 use anyhow::{anyhow, Error};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
@@ -34,12 +37,18 @@ pub struct FileKey {
 
 fn vec_to_array<T, const N: usize>(v: Vec<T>) -> Result<[T; N], Error> {
     let len = v.len();
-    v.try_into().map_err(|_| anyhow!("Expected a Vec of length {} but it was {}", N, len))
+    v.try_into()
+        .map_err(|_| anyhow!("Expected a Vec of length {} but it was {}", N, len))
 }
 
 impl FileKey {
     pub fn serialize(&self) -> String {
-        format!("{}:{}:{}", hex::encode(self.salt), hex::encode(self.nonce), self.aead)
+        format!(
+            "{}:{}:{}",
+            hex::encode(self.salt),
+            hex::encode(self.nonce),
+            self.aead
+        )
     }
 
     pub fn deserialize(s: &str) -> Result<FileKey, Error> {
@@ -90,7 +99,11 @@ impl EncryptedObjectStorage {
         key1
     }
 
-    pub fn encrypt(private_key: &str, content: &[u8], content_sha512: &str) -> Result<(FileKey, Vec<u8>), Error> {
+    pub fn encrypt(
+        private_key: &str,
+        content: &[u8],
+        content_sha512: &str,
+    ) -> Result<(FileKey, Vec<u8>), Error> {
         let salt = Self::generate_salt();
         let aes_key = Self::salt_password(private_key, &salt);
 
@@ -106,37 +119,59 @@ impl EncryptedObjectStorage {
         Ok((file_key, ciphertext))
     }
 
-    pub fn encrypt_internal(aes_key: &[u8; AES_KEY_LEN], key: &FileKey, content: &[u8]) -> Result<Vec<u8>, Error> {
+    pub fn encrypt_internal(
+        aes_key: &[u8; AES_KEY_LEN],
+        key: &FileKey,
+        content: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         let mut nonce: GenericArray<u8, U12> = Nonce::<Aes256Gcm>::default();
         nonce.copy_from_slice(&key.nonce);
 
         let cipher = Aes256Gcm::new_from_slice(aes_key)?;
 
-        let ciphertext = cipher.encrypt(&nonce, Payload {
-            msg: content,
-            aad: key.aead.as_bytes(),
-        }).map_err(|_| anyhow!("Encryption failed"))?;
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: content,
+                    aad: key.aead.as_bytes(),
+                },
+            )
+            .map_err(|_| anyhow!("Encryption failed"))?;
 
         Ok(ciphertext)
     }
 
-    pub fn decrypt(private_key: &str, file_key: &FileKey, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+    pub fn decrypt(
+        private_key: &str,
+        file_key: &FileKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         let aes_key = Self::salt_password(private_key, &file_key.salt);
         let plaintext = Self::decrypt_internal(&aes_key, file_key, ciphertext)?;
 
         Ok(plaintext)
     }
 
-    pub fn decrypt_internal(aes_key: &[u8; AES_KEY_LEN], file_key: &FileKey, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+    pub fn decrypt_internal(
+        aes_key: &[u8; AES_KEY_LEN],
+        file_key: &FileKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         let mut nonce = Nonce::<Aes256Gcm>::default();
         nonce.copy_from_slice(&file_key.nonce);
 
         let cipher = Aes256Gcm::new_from_slice(aes_key)?;
 
-        let plaintext = cipher.decrypt(&nonce, Payload {
-            msg: ciphertext,
-            aad: file_key.aead.as_bytes(),
-        }).map_err(|_| anyhow!("Decryption failed"))?;
+        let plaintext = cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: file_key.aead.as_bytes(),
+                },
+            )
+            .map_err(|_| anyhow!("Decryption failed"))?;
 
         Ok(plaintext)
     }
@@ -152,18 +187,51 @@ impl EncryptedObjectStorage {
             original_path.to_string()
         }
     }
+
+    fn add_to_keychain(keychain: &str, key: &FileKey) -> String {
+        if keychain.is_empty() {
+            key.serialize()
+        } else {
+            format!("{},{}", key.serialize(), keychain)
+        }
+    }
+
+    fn get_keys_from_keychain(keychain: &str) -> Result<Vec<FileKey>, Error> {
+        keychain
+            .split(',')
+            .map(|s| FileKey::deserialize(s))
+            .collect()
+    }
 }
 
 impl ObjectStorage for EncryptedObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
-        let key = FileKey::deserialize(&info.encryption_key)?;
-        let mut info = info.clone();
-        info.full_path = self.path(&key, &info.full_path);
+        let keys = Self::get_keys_from_keychain(&info.encryption_key)?;
 
-        let bytes = self.fs.get(&info)?;
-        let original_bytes = Self::decrypt(&self.config.encryption_key, &key, &bytes)?;
+        fn try_key(
+            this: &mut EncryptedObjectStorage,
+            info: &ObjInfo,
+            key: FileKey,
+        ) -> Result<Vec<u8>, Error> {
+            let mut info = info.clone();
+            info.full_path = this.path(&key, &info.full_path);
 
-        Ok(original_bytes)
+            let bytes = this.fs.get(&info)?;
+            EncryptedObjectStorage::decrypt(&this.config.encryption_key, &key, &bytes)
+        }
+
+        let mut last_error = None;
+
+        for key in keys {
+            match try_key(self, info, key) {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("No valid key found")))
     }
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
@@ -172,37 +240,76 @@ impl ObjectStorage for EncryptedObjectStorage {
         let prev_path = info.full_path.clone();
 
         info.full_path = full_path;
-        info.encryption_key = key.serialize();
+        info.encryption_key = Self::add_to_keychain(&info.encryption_key, &key);
         self.fs.put(info, &bytes)?;
         info.full_path = prev_path;
         Ok(())
     }
 
     fn remove(&mut self, info: &ObjInfo, _is_in_use: ObjInUseFn) -> Result<(), Error> {
-        let key = FileKey::deserialize(&info.encryption_key)?;
-        let mut info = info.clone();
-        info.full_path = self.path(&key, &info.full_path);
-        let always_unique: ObjInUseFn = Rc::new(|_, _| Ok(false));
+        let keys = Self::get_keys_from_keychain(&info.encryption_key)?;
 
-        self.fs.remove(&info, always_unique)
+        fn try_key(
+            this: &mut EncryptedObjectStorage,
+            info: &ObjInfo,
+            key: FileKey,
+        ) -> Result<(), Error> {
+            let mut info = info.clone();
+            info.full_path = this.path(&key, &info.full_path);
+
+            this.fs.remove(&info, Rc::new(|_, _| Ok(false)))
+        }
+
+        let mut last_error = None;
+
+        for key in keys {
+            match try_key(self, info, key) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("No valid key found")))
     }
 
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let key = FileKey::deserialize(&prev_info.encryption_key)?;
-        let prev_path = self.path(&key, &prev_info.full_path);
-        let new_path = self.path(&key, &new_info.full_path);
+        let keys = Self::get_keys_from_keychain(&prev_info.encryption_key)?;
 
-        if prev_path != new_path {
-            let mut prev_info = prev_info.clone();
-            let mut new_info = new_info.clone();
+        fn try_key(
+            this: &mut EncryptedObjectStorage,
+            prev_info: &ObjInfo,
+            new_info: &ObjInfo,
+            key: FileKey,
+        ) -> Result<(), AnyError> {
+            let prev_path = this.path(&key, &prev_info.full_path);
+            let new_path = this.path(&key, &new_info.full_path);
 
-            prev_info.full_path = prev_path;
-            new_info.full_path = new_path;
+            if prev_path != new_path {
+                let mut prev_info = prev_info.clone();
+                let mut new_info = new_info.clone();
 
-            self.fs.rename(&prev_info, &new_info)?;
+                prev_info.full_path = prev_path;
+                new_info.full_path = new_path;
+
+                this.fs.rename(&prev_info, &new_info)?;
+            }
+            Ok(())
         }
 
-        Ok(())
+        let mut last_error = None;
+
+        for key in keys {
+            match try_key(self, prev_info, new_info, key) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("No valid key found")))
     }
 
     fn nuke(&mut self) -> Result<(), Error> {
@@ -227,13 +334,15 @@ fn test_encryption() {
     let content = "Hello world".as_bytes();
     let content_sha512 = hex::encode(hmac_sha512::Hash::hash(content));
 
-    let (file_key, ciphertext) = EncryptedObjectStorage::encrypt(&password, content, &content_sha512).unwrap();
+    let (file_key, ciphertext) =
+        EncryptedObjectStorage::encrypt(&password, content, &content_sha512).unwrap();
     let serialized_file_key = file_key.serialize();
 
     // Storage and later retrieval
 
     let deserialized_file_key = FileKey::deserialize(&serialized_file_key).unwrap();
-    let plaintext = EncryptedObjectStorage::decrypt(&password, &deserialized_file_key, &ciphertext).unwrap();
+    let plaintext =
+        EncryptedObjectStorage::decrypt(&password, &deserialized_file_key, &ciphertext).unwrap();
 
     println!("Password: {:?}", password);
     println!("Salt: {:?}", hex::encode(file_key.salt));
@@ -247,5 +356,12 @@ fn test_encryption() {
     println!("Plaintext: {:?}", String::from_utf8_lossy(&plaintext));
 
     // Using the provided script to decrypt the ciphertext with all the parameters
-    println!(r#"deno run -A ./scripts/aes_decrypt.ts "{}" "{}" "{}" "{}" "{}""#, password, hex::encode(file_key.salt), hex::encode(file_key.nonce), file_key.aead, hex::encode(&ciphertext));
+    println!(
+        r#"deno run -A ./scripts/aes_decrypt.ts "{}" "{}" "{}" "{}" "{}""#,
+        password,
+        hex::encode(file_key.salt),
+        hex::encode(file_key.nonce),
+        file_key.aead,
+        hex::encode(&ciphertext)
+    );
 }

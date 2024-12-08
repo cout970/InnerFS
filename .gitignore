@@ -3,6 +3,7 @@
 /data
 /blob
 /run
+/bench
 index.db
 index.db-wal
 index.db-shm
