@@ -1,9 +1,9 @@
 use crate::config::StorageConfig;
 use crate::metadata_db::MetadataDB;
-use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
+use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::ObjInUseFn;
 use crate::AnyError;
-use log::{debug};
+use log::debug;
 use std::rc::Rc;
 
 pub struct SqlarObjectStorage {
@@ -55,14 +55,8 @@ impl ObjectStorage for SqlarObjectStorage {
     }
 
     fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        let test = if self.config.use_hash_as_filename {
-            UniquenessTest::Sha512
-        } else {
-            UniquenessTest::Path
-        };
-
         // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, test)? {
+        if is_in_use(info, self.config.path_generator)? {
             return Ok(());
         }
 
@@ -102,7 +96,8 @@ impl SqlarObjectStorage {
                     sz: row.read::<i64, _>(2)?,
                     data: row.read::<Vec<u8>, _>(3)?,
                 })
-            })
+            },
+        )
     }
 
     pub fn set_sqlar_file(&mut self, name: &str, file: &SqlarFile) -> Result<(), AnyError> {
@@ -127,7 +122,8 @@ impl SqlarObjectStorage {
     }
 
     pub fn remove_sqlar_file(&mut self, name: &str) -> Result<(), AnyError> {
-        self.sql.execute1("DELETE FROM sqlar WHERE name = :name", (":name", name))?;
+        self.sql
+            .execute1("DELETE FROM sqlar WHERE name = :name", (":name", name))?;
         Ok(())
     }
 

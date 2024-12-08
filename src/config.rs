@@ -1,15 +1,15 @@
-use std::fmt::Display;
-use std::{env, fs};
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use crate::metadata_db::MetadataDB;
+use crate::obj_storage::{ObjInfo, PathGenerator};
+use crate::utils::ask_for_confirmation;
+use crate::AnyError;
 use anyhow::{anyhow, Error};
 use log::error;
 use serde::{Deserialize, Serialize};
-use crate::AnyError;
-use crate::metadata_db::MetadataDB;
-use crate::obj_storage::ObjInfo;
-use crate::utils::ask_for_confirmation;
+use std::ffi::OsStr;
+use std::fmt::Display;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::{env, fs};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct YamlConfig {
@@ -30,11 +30,11 @@ struct YamlConfig {
     s3_secret_key: Option<String>,
     encryption_key: Option<String>,
     compression_level: Option<u32>,
-    use_hash_as_filename: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct YamlStorageConfig {
+    name: Option<String>,
     storage_backend: Option<String>,
     blob_storage: Option<String>,
     s3_endpoint_url: Option<String>,
@@ -46,6 +46,7 @@ pub struct YamlStorageConfig {
     encryption_key: Option<String>,
     compression_level: Option<u32>,
     use_hash_as_filename: Option<bool>,
+    use_id_as_filename: Option<bool>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -68,6 +69,7 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
+    pub name: String,
     pub storage_backend: StorageOption,
     pub blob_storage: String,
     pub s3_endpoint_url: String,
@@ -78,13 +80,14 @@ pub struct StorageConfig {
     pub s3_secret_key: String,
     pub encryption_key: String,
     pub compression_level: u32,
-    pub use_hash_as_filename: bool,
+    pub path_generator: PathGenerator,
 }
 
 /// Read and parse the main config file
 pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
     if fs::metadata(&config_path).is_err() {
-        let program_name = env::args().next()
+        let program_name = env::args()
+            .next()
             .as_ref()
             .map(Path::new)
             .and_then(Path::file_name)
@@ -92,7 +95,11 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
             .map(String::from)
             .unwrap();
 
-        return Err(anyhow!("Config file not found at {:?}, try './{} generate-config'", &config_path, program_name));
+        return Err(anyhow!(
+            "Config file not found at {:?}, try './{} generate-config'",
+            &config_path,
+            program_name
+        ));
     }
 
     let yaml_config = fs::read_to_string(config_path)
@@ -104,40 +111,63 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
     // Fields in the global config are the defaults for primary and replicas
     let primary_clone = config.primary.clone();
     let primary = primary_clone.as_ref();
+    let mut path_generation = PathGenerator::Path;
+
+    if let Some(p) = primary.clone() {
+        if p.use_id_as_filename.unwrap_or(false) {
+            path_generation = PathGenerator::Id;
+        } else if p.use_hash_as_filename.unwrap_or(false) {
+            path_generation = PathGenerator::Sha512;
+        }
+    }
+
     let primary = Rc::new(StorageConfig {
+        name: primary
+            .and_then(|p| p.name.clone())
+            .unwrap_or("primary".to_string()),
         storage_backend: StorageOption::from_string(
-            &primary.and_then(|p| p.storage_backend.clone())
-                .or(config.storage_backend.clone()))?,
-        blob_storage: primary.and_then(|p| p.blob_storage.clone())
+            &primary
+                .and_then(|p| p.storage_backend.clone())
+                .or(config.storage_backend.clone()),
+        )?,
+        blob_storage: primary
+            .and_then(|p| p.blob_storage.clone())
             .or(config.blob_storage.clone())
             .unwrap_or("./blob".to_string()),
-        s3_endpoint_url: primary.and_then(|p| p.s3_endpoint_url.clone())
+        s3_endpoint_url: primary
+            .and_then(|p| p.s3_endpoint_url.clone())
             .or(config.s3_endpoint_url.clone())
             .unwrap_or("".to_string()),
-        s3_region: primary.and_then(|p| p.s3_region.clone())
+        s3_region: primary
+            .and_then(|p| p.s3_region.clone())
             .or(config.s3_region.clone())
             .unwrap_or("".to_string()),
-        s3_bucket: primary.and_then(|p| p.s3_bucket.clone())
+        s3_bucket: primary
+            .and_then(|p| p.s3_bucket.clone())
             .or(config.s3_bucket.clone())
             .unwrap_or("".to_string()),
-        s3_base_path: primary.and_then(|p| p.s3_base_path.clone())
+        s3_base_path: primary
+            .and_then(|p| p.s3_base_path.clone())
             .or(config.s3_base_path.clone())
             .unwrap_or("".to_string()),
-        s3_access_key: primary.and_then(|p| p.s3_access_key.clone())
+        s3_access_key: primary
+            .and_then(|p| p.s3_access_key.clone())
             .or(config.s3_access_key.clone())
             .unwrap_or("".to_string()),
-        s3_secret_key: primary.and_then(|p| p.s3_secret_key.clone())
+        s3_secret_key: primary
+            .and_then(|p| p.s3_secret_key.clone())
             .or(config.s3_secret_key.clone())
             .unwrap_or("".to_string()),
-        encryption_key: primary.and_then(|p| p.encryption_key.clone())
+        encryption_key: primary
+            .and_then(|p| p.encryption_key.clone())
             .or(config.encryption_key.clone())
             .unwrap_or("".to_string()),
-        compression_level: primary.and_then(|p| p.compression_level.clone())
+        compression_level: primary
+            .and_then(|p| p.compression_level.clone())
             .or(config.compression_level.clone())
-            .unwrap_or(0).clamp(0, 9),
-        use_hash_as_filename: primary.and_then(|p| p.use_hash_as_filename.clone())
-            .or(config.use_hash_as_filename.clone())
-            .unwrap_or(false),
+            .unwrap_or(0)
+            .clamp(0, 9),
+        path_generator: path_generation,
     });
 
     let mut cfg = Config {
@@ -150,42 +180,73 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
     };
 
     let replicas = config.replicas.clone().unwrap_or_default();
+    let mut index = 0;
     for replica in &replicas {
+        let mut path_generation = PathGenerator::Path;
+
+        if replica.use_id_as_filename.unwrap_or(false) {
+            path_generation = PathGenerator::Id;
+        } else if replica.use_hash_as_filename.unwrap_or(false) {
+            path_generation = PathGenerator::Sha512;
+        }
+
         cfg.replicas.push(Rc::new(StorageConfig {
+            name: replica.name.clone().unwrap_or(format!("replica{}", index)),
             storage_backend: StorageOption::from_string(
-                &replica.storage_backend.clone()
-                    .or(config.storage_backend.clone()))?,
-            blob_storage: replica.blob_storage.clone()
+                &replica
+                    .storage_backend
+                    .clone()
+                    .or(config.storage_backend.clone()),
+            )?,
+            blob_storage: replica
+                .blob_storage
+                .clone()
                 .or(config.blob_storage.clone())
                 .unwrap_or("./blob".to_string()),
-            s3_endpoint_url: replica.s3_endpoint_url.clone()
+            s3_endpoint_url: replica
+                .s3_endpoint_url
+                .clone()
                 .or(config.s3_endpoint_url.clone())
                 .unwrap_or("".to_string()),
-            s3_region: replica.s3_region.clone()
+            s3_region: replica
+                .s3_region
+                .clone()
                 .or(config.s3_region.clone())
                 .unwrap_or("".to_string()),
-            s3_bucket: replica.s3_bucket.clone()
+            s3_bucket: replica
+                .s3_bucket
+                .clone()
                 .or(config.s3_bucket.clone())
                 .unwrap_or("".to_string()),
-            s3_base_path: replica.s3_base_path.clone()
+            s3_base_path: replica
+                .s3_base_path
+                .clone()
                 .or(config.s3_base_path.clone())
                 .unwrap_or("".to_string()),
-            s3_access_key: replica.s3_access_key.clone()
+            s3_access_key: replica
+                .s3_access_key
+                .clone()
                 .or(config.s3_access_key.clone())
                 .unwrap_or("".to_string()),
-            s3_secret_key: replica.s3_secret_key.clone()
+            s3_secret_key: replica
+                .s3_secret_key
+                .clone()
                 .or(config.s3_secret_key.clone())
                 .unwrap_or("".to_string()),
-            encryption_key: replica.encryption_key.clone()
+            encryption_key: replica
+                .encryption_key
+                .clone()
                 .or(config.encryption_key.clone())
                 .unwrap_or("".to_string()),
-            compression_level: replica.compression_level.clone()
+            compression_level: replica
+                .compression_level
+                .clone()
                 .or(config.compression_level.clone())
-                .unwrap_or(0).clamp(0, 9),
-            use_hash_as_filename: replica.use_hash_as_filename.clone()
-                .or(config.use_hash_as_filename.clone())
-                .unwrap_or(false),
+                .unwrap_or(0)
+                .clamp(0, 9),
+            path_generator: path_generation,
         }));
+        index += 1;
     }
 
     validate_storage(&cfg.primary)?;
@@ -197,7 +258,11 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
     Ok(Rc::new(cfg))
 }
 
-pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> Result<(), AnyError> {
+pub fn check_config_changes(
+    prefix: &str,
+    config: Rc<StorageConfig>,
+    sql: Rc<MetadataDB>,
+) -> Result<(), AnyError> {
     // Changing storage_option will make all the files not available
     let setting_storage_option = format!("{}:storage_option", prefix);
     let storage_option = config.storage_backend.to_string();
@@ -206,7 +271,9 @@ pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<Met
         if let Some(setting) = setting {
             if setting != storage_option {
                 error!("Storage option changed from {} to {}, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem", setting, storage_option);
-                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                if !ask_for_confirmation(
+                    "Do you want to proceed anyways? Type 'yes' or 'y' to confirm",
+                ) {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
@@ -221,28 +288,31 @@ pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<Met
     if let Some(setting) = sql.get_setting(&setting_encryption_key_hash)? {
         if setting != encryption_key {
             error!("Encryption key changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm")
+            {
                 return Err(anyhow!("Operation cancelled"));
             }
         }
     }
     sql.set_setting(&setting_encryption_key_hash, &encryption_key)?;
 
-    // Changing use_hash_as_filename will cause in a mismatch between previous and new filenames
-    let setting_use_hash_as_filename = format!("{}:use_hash_as_filename", prefix);
-    let use_hash_as_filename = config.use_hash_as_filename.to_string();
+    // Changing path_generator will cause in a mismatch between previous and new filenames
+    let setting_path_generator = format!("{}:path_generator", prefix);
+    let path_generator = config.path_generator.to_string();
     {
-        let setting = sql.get_setting(&setting_use_hash_as_filename)?;
+        let setting = sql.get_setting(&setting_path_generator)?;
         if let Some(setting) = setting {
-            if setting != use_hash_as_filename {
-                error!("use_hash_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+            if setting != path_generator {
+                error!("use_hash_as_filename or use_id_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
+                if !ask_for_confirmation(
+                    "Do you want to proceed anyways? Type 'yes' or 'y' to confirm",
+                ) {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
         }
     }
-    sql.set_setting(&setting_use_hash_as_filename, &use_hash_as_filename)?;
+    sql.set_setting(&setting_path_generator, &path_generator)?;
 
     // Changing s3 settings will make the data inaccesible
     let setting_s3_bucket = format!("{}:s3_bucket", prefix);
@@ -272,7 +342,8 @@ pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<Met
 
         if changed {
             error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
-            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm")
+            {
                 return Err(anyhow!("Operation cancelled"));
             }
         }
@@ -285,12 +356,16 @@ pub fn check_config_changes(prefix: &str, config: Rc<StorageConfig>, sql: Rc<Met
     // Changing blob_storage will make all the files not available
     let blob_storage = format!("{}:blob_storage", prefix);
 
-    if config.storage_backend == StorageOption::FileSystem || config.storage_backend == StorageOption::RocksDb {
+    if config.storage_backend == StorageOption::FileSystem
+        || config.storage_backend == StorageOption::RocksDb
+    {
         let setting = sql.get_setting(&blob_storage)?;
         if let Some(setting) = setting {
             if setting != config.blob_storage {
                 error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
-                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
+                if !ask_for_confirmation(
+                    "Do you want to proceed anyways? Type 'yes' or 'y' to confirm",
+                ) {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
@@ -325,8 +400,15 @@ fn validate_storage(cfg: &StorageConfig) -> Result<(), Error> {
         }
     }
 
+    if !cfg.encryption_key.is_empty() && cfg.path_generator == PathGenerator::Sha512 {
+        errors.push("The option use_hash_as_filename is incompatible with encryption, use use_id_as_filename instead".to_string());
+    }
+
     if !errors.is_empty() {
-        return Err(anyhow!("Config errors detected:\n - {}", errors.join("\n - ")));
+        return Err(anyhow!(
+            "Config errors detected:\n - {}",
+            errors.join("\n - ")
+        ));
     }
 
     Ok(())
@@ -334,7 +416,8 @@ fn validate_storage(cfg: &StorageConfig) -> Result<(), Error> {
 
 impl StorageOption {
     pub fn from_string(storage_backend: &Option<String>) -> Result<StorageOption, Error> {
-        let binding = storage_backend.as_ref()
+        let binding = storage_backend
+            .as_ref()
             .map(|i| i.as_str())
             .unwrap_or("FileSystem")
             .to_ascii_lowercase();
@@ -393,10 +476,16 @@ impl Display for StorageConfig {
 
 impl StorageConfig {
     pub fn path_of(&self, info: &ObjInfo) -> String {
-        if self.use_hash_as_filename {
-            if info.sha512.is_empty() { "null".to_string() } else { format!("{}.dat", &info.sha512[..32]) }
-        } else {
-            info.full_path.trim_start_matches('/').to_string()
+        match self.path_generator {
+            PathGenerator::Sha512 => {
+                if info.sha512.is_empty() {
+                    "null".to_string()
+                } else {
+                    format!("{}.dat", &info.sha512[..32])
+                }
+            }
+            PathGenerator::Id => info.id.to_string(),
+            PathGenerator::Path => info.full_path.trim_start_matches('/').to_string(),
         }
     }
 }

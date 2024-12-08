@@ -13,19 +13,20 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 // Storage backends
+pub mod debug_object_storage;
 pub mod fs_object_storage;
+pub mod rocks_db_object_storage;
 pub mod s3_object_storage;
 pub mod sqlar_object_storage;
-pub mod rocks_db_object_storage;
-pub mod debug_object_storage;
 
 // Wrappers
+pub mod compressed_object_storage;
 pub mod encrypted_object_storage;
 pub mod replicated_object_storage;
-pub mod compressed_object_storage;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ObjInfo {
+    pub id: i64,
     pub name: String,
     pub full_path: String,
     pub sha512: String,
@@ -42,11 +43,23 @@ pub struct ObjInfo {
 /// When multiple files share the same object in storage, we need to check if the object is still
 /// being used by any other file before deleting it.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub enum UniquenessTest {
+pub enum PathGenerator {
     // Check if there are other files with the same path
     Path,
     // Check if there are other files with the same content
     Sha512,
+    // Check if there are other files with the same path (based on file id)
+    Id,
+}
+
+impl PathGenerator {
+    pub fn to_string(self) -> String {
+        match self {
+            PathGenerator::Path => "path".to_string(),
+            PathGenerator::Sha512 => "sha512".to_string(),
+            PathGenerator::Id => "id".to_string(),
+        }
+    }
 }
 
 pub trait ObjectStorage {
@@ -66,6 +79,7 @@ impl Display for ObjInfo {
 impl ObjInfo {
     pub fn new(file: &FileRow, full_path: &str) -> ObjInfo {
         ObjInfo {
+            id: file.id,
             name: file.name.to_string(),
             full_path: full_path.to_string(),
             sha512: file.sha512.to_string(),
@@ -80,26 +94,21 @@ impl ObjInfo {
     }
 }
 
-pub fn create_object_storage(config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> Box<dyn ObjectStorage> {
+pub fn create_object_storage(
+    config: Rc<StorageConfig>,
+    sql: Rc<MetadataDB>,
+) -> Box<dyn ObjectStorage> {
     let mut obj_storage: Box<dyn ObjectStorage> = match &config.storage_backend {
-        StorageOption::FileSystem => {
-            Box::new(FsObjectStorage {
-                base_path: PathBuf::from(&config.blob_storage),
-                config: config.clone(),
-            })
-        }
-        StorageOption::Sqlar => {
-            Box::new(SqlarObjectStorage {
-                sql: sql.clone(),
-                config: config.clone(),
-            })
-        }
-        StorageOption::S3 => {
-            Box::new(S3ObjectStorage::new(config.clone()))
-        }
-        StorageOption::RocksDb => {
-            Box::new(RocksDbObjectStorage::new(config.clone()))
-        }
+        StorageOption::FileSystem => Box::new(FsObjectStorage {
+            base_path: PathBuf::from(&config.blob_storage),
+            config: config.clone(),
+        }),
+        StorageOption::Sqlar => Box::new(SqlarObjectStorage {
+            sql: sql.clone(),
+            config: config.clone(),
+        }),
+        StorageOption::S3 => Box::new(S3ObjectStorage::new(config.clone())),
+        StorageOption::RocksDb => Box::new(RocksDbObjectStorage::new(config.clone())),
     };
 
     if !config.encryption_key.is_empty() {
@@ -107,7 +116,10 @@ pub fn create_object_storage(config: Rc<StorageConfig>, sql: Rc<MetadataDB>) -> 
         obj_storage = Box::new(EncryptedObjectStorage::new(config.clone(), obj_storage));
     } else if config.compression_level > 0 {
         // Apply compression if a level is provided
-        obj_storage = Box::new(CompressedObjectStorage::new(obj_storage, config.compression_level));
+        obj_storage = Box::new(CompressedObjectStorage::new(
+            obj_storage,
+            config.compression_level,
+        ));
     }
 
     obj_storage

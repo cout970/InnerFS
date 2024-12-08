@@ -1,8 +1,8 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
+use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
 use crate::storage::ObjInUseFn;
 use crate::AnyError;
-use log::{debug};
+use log::debug;
 use rocksdb::{DBWithThreadMode, Options, SingleThreaded, DB};
 use std::rc::Rc;
 
@@ -20,11 +20,7 @@ impl RocksDbObjectStorage {
     }
 
     pub fn path(&self, info: &ObjInfo) -> String {
-        if self.config.use_hash_as_filename {
-            format!("{}.dat", &info.sha512[..32])
-        } else {
-            info.full_path.to_string()
-        }
+        self.config.path_of(info)
     }
 }
 
@@ -49,14 +45,9 @@ impl ObjectStorage for RocksDbObjectStorage {
 
     fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
         let path = self.path(info);
-        let test = if self.config.use_hash_as_filename {
-            UniquenessTest::Sha512
-        } else {
-            UniquenessTest::Path
-        };
 
         // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, test)? {
+        if is_in_use(info, self.config.path_generator)? {
             return Ok(());
         }
 

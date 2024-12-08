@@ -1,5 +1,5 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage, UniquenessTest};
+use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::ObjInUseFn;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
@@ -41,22 +41,16 @@ impl ObjectStorage for FsObjectStorage {
 
     fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
         let path = self.path(&info);
-        let test = if self.config.use_hash_as_filename {
-            UniquenessTest::Sha512
-        } else {
-            UniquenessTest::Path
-        };
 
         // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, test)? {
+        if is_in_use(info, self.config.path_generator)? {
             return Ok(());
         }
 
         debug!("Remove: {:?}", &path);
 
-        fs::remove_file(&path).map_err(|e| {
-            anyhow!("FS failed to remove file '{:?}': {:?}", path, e)
-        })
+        fs::remove_file(&path)
+            .map_err(|e| anyhow!("FS failed to remove file '{:?}': {:?}", path, e))
     }
 
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
@@ -78,7 +72,12 @@ impl ObjectStorage for FsObjectStorage {
             fs::create_dir_all(parent).context("FS failed to create dir")?;
         }
         fs::rename(&prev_path, &new_path).map_err(|e| {
-            anyhow!("FS failed to rename '{:?}' -> '{:?}': {:?}", prev_path, new_path, e)
+            anyhow!(
+                "FS failed to rename '{:?}' -> '{:?}': {:?}",
+                prev_path,
+                new_path,
+                e
+            )
         })
     }
 

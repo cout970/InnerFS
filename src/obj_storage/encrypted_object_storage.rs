@@ -1,5 +1,5 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
+use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
 use crate::storage::ObjInUseFn;
 use crate::AnyError;
 use aes_gcm::aead::consts::U12;
@@ -13,7 +13,6 @@ use aes_gcm::{
 use anyhow::{anyhow, Error};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 const AES_KEY_LEN: usize = 32;
@@ -176,37 +175,73 @@ impl EncryptedObjectStorage {
         Ok(plaintext)
     }
 
-    fn path(&self, key: &FileKey, original_path: &str) -> String {
-        if self.config.use_hash_as_filename {
-            let uniq = hex::encode(&key.nonce);
-            let mut path = PathBuf::from(original_path);
-            path.pop();
-            path.push(format!("{}.enc", uniq));
-            path.to_string_lossy().to_string()
-        } else {
-            original_path.to_string()
+    fn path(&self, _key: &FileKey, original_path: &str, id: i64) -> String {
+        match self.config.path_generator {
+            PathGenerator::Path => original_path.to_string(),
+            PathGenerator::Sha512 => {
+                // Use the hash of the path instead of the content, since the content is encrypted and multiple files with the same content will collide with the same hash but different keys
+                let sha512 = hex::encode(hmac_sha512::Hash::hash(original_path.as_bytes()));
+                format!("{}.enc", &sha512[..32])
+            }
+            PathGenerator::Id => format!("{}.enc", id),
         }
     }
 
-    fn add_to_keychain(keychain: &str, key: &FileKey) -> String {
+    fn add_to_keychain(keychain: &str, name: &str, key: &FileKey) -> String {
+        let key = format!("[{}]{}", name, key.serialize());
+
         if keychain.is_empty() {
-            key.serialize()
-        } else {
-            format!("{},{}", key.serialize(), keychain)
+            return key;
         }
+
+        let parts: Vec<String> = keychain.split(',').map(|i| i.to_string()).collect();
+        let mut keys = vec![key];
+
+        for part in parts {
+            if part.starts_with("[") {
+                // Tagged key
+                let key_start = part.find("]").expect("Invalid keychain");
+                let key_name = &part[1..key_start];
+
+                if key_name != name {
+                    keys.push(part);
+                }
+            } else {
+                // Untagged key
+                keys.push(part);
+            }
+        }
+
+        keys.join(",")
     }
 
-    fn get_keys_from_keychain(keychain: &str) -> Result<Vec<FileKey>, Error> {
-        keychain
-            .split(',')
-            .map(|s| FileKey::deserialize(s))
-            .collect()
+    fn get_keys_from_keychain(keychain: &str, name: &str) -> Result<Vec<FileKey>, Error> {
+        let parts: Vec<String> = keychain.split(',').map(|i| i.to_string()).collect();
+        let mut keys = vec![];
+
+        for part in parts {
+            if part.starts_with("[") {
+                // Tagged key
+                let key_start = part.find("]").ok_or_else(|| anyhow!("Invalid keychain"))?;
+                let key_name = &part[1..key_start];
+                let key_value = &part[key_start + 1..];
+
+                if key_name == name {
+                    keys.push(FileKey::deserialize(key_value)?);
+                }
+            } else {
+                // Untagged key
+                keys.push(FileKey::deserialize(&part)?);
+            }
+        }
+
+        Ok(keys)
     }
 }
 
 impl ObjectStorage for EncryptedObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
-        let keys = Self::get_keys_from_keychain(&info.encryption_key)?;
+        let keys = Self::get_keys_from_keychain(&info.encryption_key, &self.config.name)?;
 
         fn try_key(
             this: &mut EncryptedObjectStorage,
@@ -214,7 +249,7 @@ impl ObjectStorage for EncryptedObjectStorage {
             key: FileKey,
         ) -> Result<Vec<u8>, Error> {
             let mut info = info.clone();
-            info.full_path = this.path(&key, &info.full_path);
+            info.full_path = this.path(&key, &info.full_path, info.id);
 
             let bytes = this.fs.get(&info)?;
             EncryptedObjectStorage::decrypt(&this.config.encryption_key, &key, &bytes)
@@ -236,18 +271,19 @@ impl ObjectStorage for EncryptedObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
         let (key, bytes) = Self::encrypt(&self.config.encryption_key, &content, &info.sha512)?;
-        let full_path = self.path(&key, &info.full_path);
+        let full_path = self.path(&key, &info.full_path, info.id);
         let prev_path = info.full_path.clone();
 
+        // Hide real path, to avoid leaking information (only has effect if config.path_generator is Path)
         info.full_path = full_path;
-        info.encryption_key = Self::add_to_keychain(&info.encryption_key, &key);
+        info.encryption_key = Self::add_to_keychain(&info.encryption_key, &self.config.name, &key);
         self.fs.put(info, &bytes)?;
         info.full_path = prev_path;
         Ok(())
     }
 
     fn remove(&mut self, info: &ObjInfo, _is_in_use: ObjInUseFn) -> Result<(), Error> {
-        let keys = Self::get_keys_from_keychain(&info.encryption_key)?;
+        let keys = Self::get_keys_from_keychain(&info.encryption_key, &self.config.name)?;
 
         fn try_key(
             this: &mut EncryptedObjectStorage,
@@ -255,7 +291,7 @@ impl ObjectStorage for EncryptedObjectStorage {
             key: FileKey,
         ) -> Result<(), Error> {
             let mut info = info.clone();
-            info.full_path = this.path(&key, &info.full_path);
+            info.full_path = this.path(&key, &info.full_path, info.id);
 
             this.fs.remove(&info, Rc::new(|_, _| Ok(false)))
         }
@@ -275,7 +311,7 @@ impl ObjectStorage for EncryptedObjectStorage {
     }
 
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let keys = Self::get_keys_from_keychain(&prev_info.encryption_key)?;
+        let keys = Self::get_keys_from_keychain(&prev_info.encryption_key, &self.config.name)?;
 
         fn try_key(
             this: &mut EncryptedObjectStorage,
@@ -283,8 +319,8 @@ impl ObjectStorage for EncryptedObjectStorage {
             new_info: &ObjInfo,
             key: FileKey,
         ) -> Result<(), AnyError> {
-            let prev_path = this.path(&key, &prev_info.full_path);
-            let new_path = this.path(&key, &new_info.full_path);
+            let prev_path = this.path(&key, &prev_info.full_path, prev_info.id);
+            let new_path = this.path(&key, &new_info.full_path, new_info.id);
 
             if prev_path != new_path {
                 let mut prev_info = prev_info.clone();
