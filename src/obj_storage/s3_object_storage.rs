@@ -10,6 +10,7 @@ use aws_sdk_s3::Client;
 use aws_types::region::Region;
 use log::{debug};
 use std::rc::Rc;
+use aws_smithy_types::retry::RetryConfig;
 use tokio::runtime::{Builder, Runtime};
 
 pub struct S3ObjectStorage {
@@ -29,6 +30,7 @@ impl S3ObjectStorage {
         let creds = Credentials::new(&config.s3_access_key, &config.s3_secret_key, None, None, "config.yml");
 
         let s3_config = aws_types::sdk_config::Builder::default()
+            .retry_config(RetryConfig::standard().with_max_attempts(5))
             .region(Region::new(config.s3_region.to_string()))
             .endpoint_url(config.s3_endpoint_url.to_string())
             .credentials_provider(SharedCredentialsProvider::new(creds))
