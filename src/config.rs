@@ -19,6 +19,7 @@ struct YamlConfig {
     store_file_change_history: Option<bool>,
     primary: Option<YamlStorageConfig>,
     replicas: Option<Vec<YamlStorageConfig>>,
+    readonly: Option<bool>,
     // Default value for each backend
     blob_storage: Option<String>,
     storage_backend: Option<String>,
@@ -73,6 +74,7 @@ pub struct Config {
     pub replicas: Vec<Rc<StorageConfig>>,
     pub update_access_time: bool,
     pub store_file_change_history: bool,
+    pub readonly: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +188,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
         replicas: vec![],
         update_access_time: config.update_access_time.unwrap_or(false),
         store_file_change_history: config.store_file_change_history.unwrap_or(true),
+        readonly: config.readonly.unwrap_or(false),
     };
 
     let replicas = config.replicas.clone().unwrap_or_default();

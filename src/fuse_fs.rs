@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use cntr_fuse::{fuse_forget_one, FileAttr, FileType, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen, ReplyRead, ReplyStatfs, ReplyWrite, Request, UtimeSpec};
-use libc::{c_int, ENOENT, ENOSYS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY};
+use libc::{c_int, ENOENT, ENOSYS, EROFS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY};
 use log::{error, trace, warn};
 
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
@@ -209,7 +209,9 @@ impl Filesystem for FuseFileSystem {
                 reply.entry(&self.get_ttl(), &attr, 0);
             }
             Err(e) => {
-                error!("Error creating file: {:?}", e.error);
+                if e.code != EROFS {
+                    error!("Error creating file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -224,7 +226,9 @@ impl Filesystem for FuseFileSystem {
                 reply.entry(&self.get_ttl(), &attr, 0);
             }
             Err(e) => {
-                error!("Error creating directory: {:?}", e.error);
+                if e.code != EROFS {
+                    error!("Error creating directory: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -238,7 +242,7 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                if e.code != ENOENT {
+                if e.code != ENOENT && e.code != EROFS {
                     error!("Error unlinking file: {:?}", e.error);
                 }
                 reply.error(e.code);
@@ -254,7 +258,7 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                if e.code != ENOENT {
+                if e.code != ENOENT && e.code != EROFS {
                     error!("Error removing directory: {:?}", e.error);
                 }
                 reply.error(e.code);
@@ -301,7 +305,9 @@ impl Filesystem for FuseFileSystem {
                     reply.ok();
                 }
                 Err(e) => {
-                    error!("Error renaming file: {:?}", e.error);
+                    if e.code != EROFS {
+                        error!("Error renaming file: {:?}", e.error);
+                    }
                     reply.error(e.code);
                 }
             }
@@ -313,7 +319,9 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                error!("Error renaming file: {:?}", e.error);
+                if e.code != EROFS {
+                    error!("Error renaming file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -343,7 +351,7 @@ impl Filesystem for FuseFileSystem {
                 reply.opened(fh, flags);
             }
             Err(e) => {
-                if e.code != ENOENT {
+                if e.code != ENOENT && e.code != EROFS {
                     error!("Error opening file: {:?}", e.error);
                 }
                 reply.error(e.code);
@@ -371,7 +379,9 @@ impl Filesystem for FuseFileSystem {
                 reply.written(size as u32);
             }
             Err(e) => {
-                error!("Error writing file: {:?}", e.error);
+                if e.code != EROFS {
+                    error!("Error writing file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -384,7 +394,9 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                error!("Error flushing file: {:?}", e.error);
+                if e.code != EROFS {
+                    error!("Error flushing file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }
@@ -398,7 +410,9 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                error!("Error releasing file: {:?}", e.error);
+                if e.code != EROFS {
+                    error!("Error releasing file: {:?}", e.error);
+                }
                 reply.error(e.code);
             }
         }

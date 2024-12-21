@@ -57,6 +57,9 @@ update_access_time: false
 # To slightly improve performance, you can disable this feature
 store_file_change_history: true
 
+# If set to true, any operation that would modify the database or the blobs will be rejected
+readonly: false
+
 ### Default values for primary/replicas fields
 blob_storage: ./blob
 s3_bucket: my-bucket

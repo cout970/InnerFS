@@ -11,7 +11,7 @@ use crate::storage::{Storage};
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, O_RDONLY, O_WRONLY};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, EROFS, O_RDONLY, O_RDWR, O_WRONLY};
 
 pub struct SqlFileSystem {
     pub sql: Rc<MetadataDB>,
@@ -83,7 +83,6 @@ impl SqlFileSystem {
         Ok(complete_buff)
     }
 
-    #[allow(dead_code)]
     pub fn write_all(&mut self, id: i64, contents: &[u8]) -> Result<(), SqlFileSystemError> {
         const BLOCK_SIZE: usize = 65536; // 64kb
 
@@ -147,6 +146,9 @@ impl SqlFileSystem {
         new_parent_id: i64,
         new_name: &str,
     ) -> Result<(), SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         self.transaction(|this| {
             let now = current_timestamp();
             let old_path = format!("{}/{}", this.sql.get_file_path(parent_id)?, name);
@@ -213,6 +215,9 @@ impl SqlFileSystem {
         new_parent_id: i64,
         new_name: &str,
     ) -> Result<i64, SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         if !self.is_validate_file_name(name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
@@ -325,6 +330,9 @@ impl SqlFileSystem {
         mtime: Option<i64>,
         crtime: Option<i64>,
     ) -> Result<FileRow, SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         self.transaction(|this| {
             let mut file = this.get_file_or_err(id)?;
 
@@ -368,6 +376,9 @@ impl SqlFileSystem {
         gid: u32,
         mode: u32,
     ) -> Result<FileRow, SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         if !self.is_validate_file_name(name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
@@ -450,6 +461,9 @@ impl SqlFileSystem {
         gid: u32,
         mode: u32,
     ) -> Result<FileRow, SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         if !self.is_validate_file_name(name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
@@ -526,6 +540,9 @@ impl SqlFileSystem {
     }
 
     pub fn unlink(&mut self, parent: i64, name: &str) -> Result<(), SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         if !self.is_validate_file_name(name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
@@ -553,6 +570,9 @@ impl SqlFileSystem {
     }
 
     pub fn rmdir(&mut self, parent: i64, name: &str) -> Result<(), SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         if !self.is_validate_file_name(name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", name));
         }
@@ -593,6 +613,9 @@ impl SqlFileSystem {
         old_name: &str,
         new_name: &str,
     ) -> Result<(), SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         if !self.is_validate_file_name(old_name) {
             return error(EINVAL, anyhow!("Invalid file name: {}", old_name));
         }
@@ -652,6 +675,14 @@ impl SqlFileSystem {
     pub fn open(&mut self, id: i64, flags: u32) -> Result<(), SqlFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
 
+        if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0) {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
+
+        if file.kind == FILE_KIND_DIRECTORY {
+            return error(EISDIR, anyhow!("Cannot open directory"));
+        }
+
         let full_path = self.sql.get_file_path(file.id)?;
         let modified = self
             .storage
@@ -695,6 +726,9 @@ impl SqlFileSystem {
         offset: i64,
         data: &[u8],
     ) -> Result<usize, SqlFileSystemError> {
+        if self.config.readonly {
+            return error(EROFS, anyhow!("Read-only filesystem"));
+        }
         let file = self.get_file_or_err(id)?;
 
         let len = self.storage.write(&file, offset as u64, data)?;
