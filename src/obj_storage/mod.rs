@@ -11,6 +11,7 @@ use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::Rc;
+use crate::obj_storage::versioned_object_storage::VersionedObjectStorage;
 
 // Storage backends
 pub mod debug_object_storage;
@@ -23,10 +24,12 @@ pub mod sqlar_object_storage;
 pub mod compressed_object_storage;
 pub mod encrypted_object_storage;
 pub mod replicated_object_storage;
+pub mod versioned_object_storage;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ObjInfo {
     pub id: i64,
+    pub version: i64,
     pub name: String,
     pub full_path: String,
     pub sha512: String,
@@ -80,6 +83,7 @@ impl ObjInfo {
     pub fn new(file: &FileRow, full_path: &str) -> ObjInfo {
         ObjInfo {
             id: file.id,
+            version: file.version,
             name: file.name.to_string(),
             full_path: full_path.to_string(),
             sha512: file.sha512.to_string(),
@@ -120,6 +124,10 @@ pub fn create_object_storage(
             obj_storage,
             config.compression_level,
         ));
+    }
+
+    if config.use_versioning {
+        obj_storage = Box::new(VersionedObjectStorage::new(obj_storage));
     }
 
     obj_storage

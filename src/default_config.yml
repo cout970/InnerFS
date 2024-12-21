@@ -43,6 +43,8 @@ primary:
   use_hash_as_filename: false
   # If the setting 'use_hash_as_filename' is false, will use the inode number as filename
   use_id_as_filename: false
+  # If set to true, the blobs will be versioned, and the old versions will be kept forever
+  use_versioning: false
 
 # Same settings as primary, but allows to specify multiple replicas
 # Write operations will be performed on all replicas, but read operations will be performed on the primary only

@@ -31,6 +31,7 @@ struct YamlConfig {
     s3_secret_key: Option<String>,
     encryption_key: Option<YamlEncryptionKeyConfig>,
     compression_level: Option<u32>,
+    use_versioning: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -48,6 +49,7 @@ pub struct YamlStorageConfig {
     compression_level: Option<u32>,
     use_hash_as_filename: Option<bool>,
     use_id_as_filename: Option<bool>,
+    use_versioning: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -90,6 +92,7 @@ pub struct StorageConfig {
     pub s3_secret_key: String,
     pub encryption_key: String,
     pub compression_level: u32,
+    pub use_versioning: bool,
     pub path_generator: PathGenerator,
 }
 
@@ -178,6 +181,10 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
             .or(config.compression_level.clone())
             .unwrap_or(0)
             .clamp(0, 9),
+        use_versioning: primary
+            .and_then(|p| p.use_versioning.clone())
+            .or(config.use_versioning.clone())
+            .unwrap_or(false),
         path_generator: path_generation,
     });
 
@@ -257,6 +264,11 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
                 .or(config.compression_level.clone())
                 .unwrap_or(0)
                 .clamp(0, 9),
+            use_versioning: replica
+                .use_versioning
+                .clone()
+                .or(config.use_versioning.clone())
+                .unwrap_or(false),
             path_generator: path_generation,
         }));
         index += 1;

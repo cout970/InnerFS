@@ -19,7 +19,10 @@
 - [x] Support RocksDB
 - [x] Store compression algorithm and settings in the index to support mixed compression algorithms
 - [x] Verify integrity of files, check sha512 and size
-- Implement methods from the newest FUSE ABI
+- [x] Implement methods from the newest FUSE ABI
+- [x] Read only mode
+- [x] Support versioning of files
+- Find a way to support deduplication and encryption at the same time
 - Add benchmarks showing the performance with different config parameters
 - Import index from json/yaml, maybe?
 - Generate index from existing folder
@@ -28,9 +31,9 @@
 - Sync with folder, like rsync
 - Encryption of index.db
 - Docker image
-- Read only mode
 - Export to sqlar, even if the files are stored in S3
 - Export to .innerfs file, that is a sqlar file with the index and the files
 - Mount .innerfs file with file explorer with double click, like any zip file
+- Automatic backups of the database, sqlite VACUUM INTO 'backup.db', config for periodicity
 
-### Bugs
+### Known Bugs
