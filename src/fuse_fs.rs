@@ -583,9 +583,39 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn ioctl(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _flags: u32, _cmd: u32, _in_data: Option<&[u8]>, _out_size: u32, reply: ReplyIoctl) {
-        trace!("FS ioctl(ino: {}, file_handle: {}, flags: {}, cmd: {}, in_data: {:?}, out_size: {})", _ino, _fh, _flags, _cmd, _in_data, _out_size);
-        warn!("Operation ioctl not implemented");
+    fn ioctl(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: u32, cmd: u32, _in_data: Option<&[u8]>, out_size: u32, reply: ReplyIoctl) {
+        trace!("FS ioctl(ino: {}, file_handle: {}, flags: {}, cmd: {}, in_data: {:?}, out_size: {})", ino, _fh, _flags, cmd, _in_data, out_size);
+        match cmd {
+            //  Get the number of bytes available for reading.
+            0x541B /* FIONREAD */ => {
+                match self.fs.get_file_or_err(ino as i64) {
+                    Ok(file) => {
+                        let size = file.size as i32;
+                        let buff = size.to_ne_bytes();
+                        reply.ioctl(0, &buff);
+                    }
+                    Err(e) => {
+                        if e.code != ENOENT {
+                            error!("Error ioctl: {:#}", e.error);
+                        }
+                        reply.error(e.code);
+                    }
+                }
+                return;
+            }
+            /* FS_IOC_GETFSLABEL */ 2164298801 => {
+                let label = "InnerFS";
+                let mut label_buffer = vec![0u8; out_size as usize];
+                let label_bytes = label.as_bytes();
+                let len = label_bytes.len().min(out_size as usize);
+                label_buffer[..len].copy_from_slice(&label_bytes[..len]);
+                reply.ioctl(0, &label_buffer);
+                return;
+            }
+            _ => {
+                warn!("Operation ioctl {} not implemented", cmd);
+            }
+        }
         reply.error(ENOSYS);
     }
 
