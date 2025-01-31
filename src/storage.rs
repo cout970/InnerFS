@@ -20,4 +20,6 @@ pub trait Storage {
     ) -> Result<(), AnyError>;
     fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError>;
     fn nuke(&mut self) -> Result<(), AnyError>;
+    #[allow(dead_code)]
+    fn clone(&self) -> Box<dyn Storage>;
 }

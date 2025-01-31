@@ -43,4 +43,11 @@ impl ObjectStorage for ReplicatedObjectStorage {
         }
         Ok(())
     }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self {
+            primary: self.primary.clone(),
+            replicas: self.replicas.iter().map(|r| r.as_ref().clone()).collect(),
+        })
+    }
 }

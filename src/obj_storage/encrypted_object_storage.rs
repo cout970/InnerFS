@@ -14,6 +14,7 @@ use anyhow::{anyhow, Error};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use std::rc::Rc;
+use std::sync::Arc;
 
 const AES_KEY_LEN: usize = 32;
 const SALT_LEN: usize = 32;
@@ -24,7 +25,7 @@ const AEAD_LEN: usize = 10;
 const PBKDF2_ITERATIONS: u32 = 256;
 
 pub struct EncryptedObjectStorage {
-    config: Rc<StorageConfig>,
+    config: Arc<StorageConfig>,
     fs: Box<dyn ObjectStorage>,
 }
 
@@ -82,7 +83,7 @@ impl FileKey {
 }
 
 impl EncryptedObjectStorage {
-    pub fn new(config: Rc<StorageConfig>, fs: Box<dyn ObjectStorage>) -> EncryptedObjectStorage {
+    pub fn new(config: Arc<StorageConfig>, fs: Box<dyn ObjectStorage>) -> EncryptedObjectStorage {
         EncryptedObjectStorage { config, fs }
     }
 
@@ -352,6 +353,13 @@ impl ObjectStorage for EncryptedObjectStorage {
 
     fn nuke(&mut self) -> Result<(), Error> {
         self.fs.nuke()
+    }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self {
+            config: self.config.clone(),
+            fs: self.fs.clone(),
+        })
     }
 }
 

@@ -6,11 +6,11 @@ use anyhow::{anyhow, Context};
 use log::{debug, error};
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct FsObjectStorage {
     pub base_path: PathBuf,
-    pub config: Rc<StorageConfig>,
+    pub config: Arc<StorageConfig>,
 }
 
 impl FsObjectStorage {
@@ -107,5 +107,12 @@ impl ObjectStorage for FsObjectStorage {
         }
 
         Ok(())
+    }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self {
+            base_path: self.base_path.clone(),
+            config: self.config.clone(),
+        })
     }
 }

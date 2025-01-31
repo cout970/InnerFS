@@ -4,15 +4,15 @@ use crate::storage::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
 use rocksdb::{DBWithThreadMode, Options, SingleThreaded, DB};
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct RocksDbObjectStorage {
     db: DBWithThreadMode<SingleThreaded>,
-    config: Rc<StorageConfig>,
+    config: Arc<StorageConfig>,
 }
 
 impl RocksDbObjectStorage {
-    pub fn new(config: Rc<StorageConfig>) -> RocksDbObjectStorage {
+    pub fn new(config: Arc<StorageConfig>) -> RocksDbObjectStorage {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         let db = DB::open_cf(&opts, &config.blob_storage, ["default"]).unwrap();
@@ -77,5 +77,9 @@ impl ObjectStorage for RocksDbObjectStorage {
         debug!("Nuke");
         self.db.drop_cf("default")?;
         Ok(())
+    }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self::new(self.config.clone()))
     }
 }

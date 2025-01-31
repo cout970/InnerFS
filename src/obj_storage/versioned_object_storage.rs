@@ -50,4 +50,10 @@ impl ObjectStorage for VersionedObjectStorage {
     fn nuke(&mut self) -> Result<(), AnyError> {
         self.storage.nuke()
     }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self {
+            storage: self.storage.clone(),
+        })
+    }
 }

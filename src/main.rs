@@ -1,4 +1,4 @@
-use crate::config::{check_config_changes, read_config};
+use crate::config::{check_config_changes, read_config, Config};
 use crate::fuse_fs::FuseFileSystem;
 use crate::metadata_db::{MetadataDB, NO_BINDINGS};
 use crate::obj_storage::{create_object_storage, ObjectStorage};
@@ -8,29 +8,33 @@ use fs::File;
 use log::{error, info, warn};
 use std::ffi::OsStr;
 use std::io::Write;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::{env, fs, thread};
+use std::sync::Arc;
 
+mod api;
+mod cli;
 mod config;
-mod metadata_db;
+mod fs_tree;
 mod fuse_fs;
+mod metadata_db;
+mod obj_storage;
+mod semver;
 mod sql_fs;
 mod storage;
-mod obj_storage;
 mod storage_interface;
-mod fs_tree;
 mod utils;
-mod cli;
 
+use crate::api::start_webdav_server;
 use crate::cli::{Cli, Commands, FileExportFormat, IndexExportFormat};
 use crate::fs_tree::{FsTree, FsTreeKind};
 use crate::obj_storage::replicated_object_storage::ReplicatedObjectStorage;
 use crate::sql_fs::SqlFileSystem;
 use crate::storage_interface::StorageInterface;
 use crate::utils::humanize_bytes_binary;
-use clap::{Parser};
+use clap::Parser;
 use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -42,14 +46,32 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub type AnyError = anyhow::Error;
 
 fn main() {
+    start_cli()
+}
+
+fn start_cli() {
     // Parse command line arguments
     let cli = Cli::parse();
 
     // Init logger
     env_logger::Builder::from_env(Env::default())
         .filter(Some("cntr_fuse"), log::LevelFilter::Info)
-        .filter(Some("InnerFS::proxy_fs"), if cli.debug { log::LevelFilter::Trace } else { log::LevelFilter::Info })
-        .filter(Some("InnerFS"), if cli.debug { log::LevelFilter::Trace } else { log::LevelFilter::Info })
+        .filter(
+            Some("InnerFS::proxy_fs"),
+            if cli.debug {
+                log::LevelFilter::Trace
+            } else {
+                log::LevelFilter::Info
+            },
+        )
+        .filter(
+            Some("InnerFS"),
+            if cli.debug {
+                log::LevelFilter::Trace
+            } else {
+                log::LevelFilter::Info
+            },
+        )
         .init();
 
     // Config path is required, if not provided, use the default one
@@ -83,8 +105,7 @@ fn main() {
     };
     info!("Config loaded");
 
-    let sql = Rc::new(MetadataDB::open(&config.database_file));
-    sql.run_migrations().expect("Unable to run migrations");
+    let fs = init_fs(config.clone());
 
     // Check if the nuke command is being executed
     let is_nuke = match cli.command {
@@ -92,37 +113,9 @@ fn main() {
         _ => false,
     };
 
-    // Check if the config file has changed in incompatible ways (except for the nuke command)
     if !is_nuke {
-        check_config_changes("primary", config.primary.clone(), sql.clone()).unwrap();
+        check_config(fs.config.clone(), fs.sql.clone())
     }
-
-    // Select the appropriate storage backend
-    let mut obj_storage: Box<dyn ObjectStorage> = create_object_storage(config.primary.clone(), sql.clone());
-
-    // Add replicas
-    if !config.replicas.is_empty() {
-        let mut rep = ReplicatedObjectStorage {
-            primary: obj_storage,
-            replicas: vec![],
-        };
-
-        for (index, replica) in config.replicas.iter().enumerate() {
-            if !is_nuke {
-                check_config_changes(&format!("replica_{}", index), replica.clone(), sql.clone()).unwrap();
-            }
-
-            rep.replicas.push(
-                create_object_storage(replica.clone(), sql.clone())
-            );
-        }
-
-        obj_storage = Box::new(rep);
-    }
-
-    // Wrap the storage backend in a StorageInterface, which provides a higher-level API
-    let storage = Box::new(StorageInterface::new(obj_storage));
-    let fs = SqlFileSystem::new(sql, config.clone(), storage);
 
     let cmd = cli.command.unwrap_or_else(|| Commands::Mount);
 
@@ -134,6 +127,45 @@ fn main() {
         Commands::GenerateConfig => unreachable!(),
         Commands::Stats => stats(fs).unwrap(),
         Commands::Verify => verify(fs).unwrap(),
+        Commands::Webdav { address } => start_webdav_server(fs, address).unwrap(),
+    }
+}
+
+fn init_fs(config: Arc<Config>) -> SqlFileSystem {
+    let sql = Rc::new(MetadataDB::open(&config.database_file));
+    sql.run_migrations().expect("Unable to run migrations");
+
+    // Select the appropriate storage backend
+    let mut obj_storage: Box<dyn ObjectStorage> = create_object_storage(config.primary.clone(), sql.clone());
+
+    // Add replicas
+    if !config.replicas.is_empty() {
+        let mut rep = ReplicatedObjectStorage {
+            primary: obj_storage,
+            replicas: vec![],
+        };
+
+        for replica in &config.replicas {
+            rep.replicas.push(create_object_storage(replica.clone(), sql.clone()));
+        }
+
+        obj_storage = Box::new(rep);
+    }
+
+    // Wrap the storage backend in a StorageInterface, which provides a higher-level API
+    let storage = Box::new(StorageInterface::new(obj_storage));
+
+    SqlFileSystem::new(sql.clone(), config, storage)
+}
+
+fn check_config(config: Arc<Config>, sql: Rc<MetadataDB>) {
+    // Check if the config file has changed in incompatible ways (except for the nuke command)
+    check_config_changes("primary", config.primary.clone(), sql.clone()).unwrap();
+
+    if !config.replicas.is_empty() {
+        for (index, replica) in config.replicas.iter().enumerate() {
+            check_config_changes(&format!("replica_{}", index), replica.clone(), sql.clone()).unwrap();
+        }
     }
 }
 
@@ -259,7 +291,11 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
                 header.set_mode(child.perms as u32);
                 header.set_uid(child.uid as u64);
                 header.set_gid(child.gid as u64);
-                header.set_entry_type(if child.kind == FsTreeKind::Directory { tar::EntryType::Directory } else { tar::EntryType::Regular });
+                header.set_entry_type(if child.kind == FsTreeKind::Directory {
+                    tar::EntryType::Directory
+                } else {
+                    tar::EntryType::Regular
+                });
                 header.set_cksum();
 
                 if child.kind == FsTreeKind::Directory {
@@ -301,21 +337,24 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
 
 /// Print stats about the filesystem
 fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
-    let [total, directories, regular] = fs.sql.get_row(
-        "
+    let [total, directories, regular] = fs
+        .sql
+        .get_row(
+            "
         SELECT count(*)                      AS total,
                count(iif(kind = 0, 1, NULL)) AS directories,
                count(iif(kind = 1, 1, NULL)) AS regular
         FROM files",
-        NO_BINDINGS.as_ref(),
-        |row| {
-            Ok([
-                row.read::<i64, _>("total")?,
-                row.read::<i64, _>("directories")?,
-                row.read::<i64, _>("regular")?,
-            ])
-        },
-    )?.unwrap();
+            NO_BINDINGS.as_ref(),
+            |row| {
+                Ok([
+                    row.read::<i64, _>("total")?,
+                    row.read::<i64, _>("directories")?,
+                    row.read::<i64, _>("regular")?,
+                ])
+            },
+        )?
+        .unwrap();
 
     let top_largest_files = fs.sql.get_rows(
         "
@@ -352,21 +391,24 @@ fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
         },
     )?;
 
-    let [sqlar_total, sqlar_size, sqlar_size_real] = fs.sql.get_row(
-        "
+    let [sqlar_total, sqlar_size, sqlar_size_real] = fs
+        .sql
+        .get_row(
+            "
         SELECT count(*)          AS total,
                sum(sz)           AS size,
                sum(length(data)) AS size_real
         FROM sqlar",
-        NO_BINDINGS.as_ref(),
-        |row| {
-            Ok([
-                row.read::<i64, _>("total")?,
-                row.read::<i64, _>("size")?,
-                row.read::<i64, _>("size_real")?,
-            ])
-        },
-    )?.unwrap();
+            NO_BINDINGS.as_ref(),
+            |row| {
+                Ok([
+                    row.read::<i64, _>("total")?,
+                    row.read::<i64, _>("size")?,
+                    row.read::<i64, _>("size_real")?,
+                ])
+            },
+        )?
+        .unwrap();
 
     let stats = json!({
         "files": {
@@ -393,14 +435,17 @@ fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
 
 // Verify integrity of the filesystem contents
 fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
-    let total = fs.sql.get_row(
-        "
+    let total = fs
+        .sql
+        .get_row(
+            "
         SELECT count(*)                      AS total
         FROM files f LEFT JOIN directory_entries e ON e.entry_file_id = f.id
         WHERE f.kind = 0 AND e.entry_file_id IS NULL",
-        NO_BINDINGS.as_ref(),
-        |row| Ok(row.read::<i64, _>("total")?),
-    )?.unwrap();
+            NO_BINDINGS.as_ref(),
+            |row| Ok(row.read::<i64, _>("total")?),
+        )?
+        .unwrap();
 
     if total > 0 {
         warn!("Found {} orphan files!", total);
@@ -414,8 +459,12 @@ fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
         let data = fs.read_all(child.id).context("Unable to read file")?;
 
         if data.len() != child.size as usize {
-            return Err(anyhow!("Content size mismatch: stored: {} ({}), computed: {} ({})",
-                child.size, humanize_bytes_binary(child.size as usize), data.len(), humanize_bytes_binary(data.len())
+            return Err(anyhow!(
+                "Content size mismatch: stored: {} ({}), computed: {} ({})",
+                child.size,
+                humanize_bytes_binary(child.size as usize),
+                data.len(),
+                humanize_bytes_binary(data.len())
             ));
         }
 
@@ -423,7 +472,11 @@ fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
             let sha512 = hex::encode(hmac_sha512::Hash::hash(&data));
 
             if sha512 != child.sha512 {
-                return Err(anyhow!("Content hash mismatch: stored: '{}', computed: '{}'", &child.sha512[..32], &sha512[..32]));
+                return Err(anyhow!(
+                    "Content hash mismatch: stored: '{}', computed: '{}'",
+                    &child.sha512[..32],
+                    &sha512[..32]
+                ));
             }
         }
 

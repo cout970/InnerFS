@@ -10,6 +10,7 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{env, fs};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct YamlConfig {
@@ -72,8 +73,8 @@ pub enum StorageOption {
 pub struct Config {
     pub database_file: String,
     pub mount_point: String,
-    pub primary: Rc<StorageConfig>,
-    pub replicas: Vec<Rc<StorageConfig>>,
+    pub primary: Arc<StorageConfig>,
+    pub replicas: Vec<Arc<StorageConfig>>,
     pub update_access_time: bool,
     pub store_file_change_history: bool,
     pub readonly: bool,
@@ -97,7 +98,7 @@ pub struct StorageConfig {
 }
 
 /// Read and parse the main config file
-pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
+pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
     if fs::metadata(&config_path).is_err() {
         let program_name = env::args()
             .next()
@@ -134,7 +135,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
         }
     }
 
-    let primary = Rc::new(StorageConfig {
+    let primary = Arc::new(StorageConfig {
         name: primary
             .and_then(|p| p.name.clone())
             .unwrap_or("primary".to_string()),
@@ -209,7 +210,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
             path_generation = PathGenerator::Sha512;
         }
 
-        cfg.replicas.push(Rc::new(StorageConfig {
+        cfg.replicas.push(Arc::new(StorageConfig {
             name: replica.name.clone().unwrap_or(format!("replica{}", index)),
             storage_backend: StorageOption::from_string(
                 &replica
@@ -280,7 +281,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Rc<Config>, Error> {
         validate_storage(i)?;
     }
 
-    Ok(Rc::new(cfg))
+    Ok(Arc::new(cfg))
 }
 
 fn extract_encryption_key(value: YamlEncryptionKeyConfig) -> String {
@@ -301,7 +302,7 @@ fn extract_encryption_key(value: YamlEncryptionKeyConfig) -> String {
 
 pub fn check_config_changes(
     prefix: &str,
-    config: Rc<StorageConfig>,
+    config: Arc<StorageConfig>,
     sql: Rc<MetadataDB>,
 ) -> Result<(), AnyError> {
     // Changing storage_option will make all the files not available

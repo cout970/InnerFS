@@ -1,15 +1,18 @@
+use crate::fs_tree::{FsTree, FsTreeRef};
+use crate::semver::Semver;
+use crate::{AnyError, VERSION};
+use anyhow::anyhow;
+use itertools::Itertools;
+use log::info;
+use sqlite::{Bindable, State, Statement};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use anyhow::anyhow;
-use log::info;
-use sqlite::{Bindable, State, Statement};
-use crate::{AnyError, VERSION};
-use crate::fs_tree::{FsTree, FsTreeRef};
 
 pub struct MetadataDB {
     pub connection: sqlite::Connection,
+    pub database_file: String,
 }
 
 pub const ROOT_DIRECTORY_ID: i64 = 1;
@@ -58,7 +61,14 @@ impl MetadataDB {
     pub fn open(database_file: &str) -> MetadataDB {
         let connection = sqlite::open(database_file).expect("Unable to open database");
 
-        MetadataDB { connection }
+        MetadataDB {
+            connection,
+            database_file: database_file.to_string(),
+        }
+    }
+
+    pub fn clone(&self) -> Self {
+        MetadataDB::open(&self.database_file)
     }
 
     pub fn run_migrations(&self) -> Result<(), AnyError> {
@@ -69,36 +79,59 @@ impl MetadataDB {
         self.connection.execute(include_str!("./sql/directory_entries.sql"))?;
         self.connection.execute(include_str!("./sql/file_changes.sql"))?;
         self.connection.execute(include_str!("./sql/sqlar.sql"))?;
+        self.connection.execute(include_str!("./sql/external_ids.sql"))?;
 
         // Schema version
         let version = self.get_row(
             "SELECT version FROM migrations ORDER BY id DESC LIMIT 1",
             NO_BINDINGS.as_ref(),
-            |stm| {
-                Ok(stm.read::<String, _>("version")?)
-            },
+            |stm| Ok(stm.read::<String, _>("version")?),
         )?;
 
         let mut version = match version {
-            Some(v) => v,
+            Some(v) => Semver::parse(&v)?,
             None => {
                 // Initial setup from empty database
                 info!("Initializing database for first time");
                 self.connection.execute(include_str!("./sql/create_root_file.sql"))?;
-                self.execute1("INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))", (":version", VERSION))?;
+                self.execute1(
+                    "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
+                    (":version", VERSION),
+                )?;
                 return Ok(());
             }
         };
 
-        if &version == "1.0.1" {
+        if version < Semver::new(1, 0, 2) {
             info!("Running migration from version: '1.0.1' to '1.0.2'");
             // New version column, or ignore error if it already exists
-            let _ = self.connection.execute("ALTER TABLE files ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
-            let _ = self.connection.execute("ALTER TABLE files ADD COLUMN compression TEXT NOT NULL DEFAULT ''");
-            let _ = self.connection.execute("ALTER TABLE file_changes RENAME COLUMN file_sha512 file_hash TEXT NOT NULL");
-            let _ = self.connection.execute("ALTER TABLE directory_entry RENAME TO directory_entries");
-            version = "1.0.2".to_string();
-            self.execute1("INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))", (":version", VERSION))?;
+            let _ = self
+                .connection
+                .execute("ALTER TABLE files ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+            let _ = self
+                .connection
+                .execute("ALTER TABLE files ADD COLUMN compression TEXT NOT NULL DEFAULT ''");
+            let _ = self
+                .connection
+                .execute("ALTER TABLE file_changes RENAME COLUMN file_sha512 file_hash TEXT NOT NULL");
+            let _ = self
+                .connection
+                .execute("ALTER TABLE directory_entry RENAME TO directory_entries");
+            version = Semver::new(1, 0, 2);
+            self.execute1(
+                "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
+                (":version", VERSION),
+            )?;
+        }
+
+        if version < Semver::new(1, 1, 0) {
+            self.connection
+                .execute(include_str!("./sql/migration_external_ids.sql"))?;
+            version = Semver::new(1, 1, 0);
+            self.execute1(
+                "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
+                (":version", VERSION),
+            )?;
         }
 
         info!("Database is up to date at version: {}", version);
@@ -106,9 +139,11 @@ impl MetadataDB {
     }
 
     pub fn get_setting(&self, name: &str) -> Result<Option<String>, AnyError> {
-        self.get_row("SELECT setting_value FROM persistent_settings WHERE setting_name = :name", (":name", name), |row| {
-            Ok(row.read("setting_value")?)
-        })
+        self.get_row(
+            "SELECT setting_value FROM persistent_settings WHERE setting_name = :name",
+            (":name", name),
+            |row| Ok(row.read("setting_value")?),
+        )
     }
 
     pub fn set_setting(&self, name: &str, value: &str) -> Result<(), AnyError> {
@@ -139,31 +174,56 @@ impl MetadataDB {
         )?;
 
         let id = self.get_last_inserted_row_id()?;
+
+        self.execute1("INSERT INTO external_ids (internal_id, type) VALUES (:id, 0)", (":id", id))?;
+
         Ok(id)
     }
 
     pub fn get_file(&self, id: i64) -> Result<Option<FileRow>, AnyError> {
-        self.get_row(
-            "SELECT * FROM files WHERE id = :id",
-            (":id", id),
-            |row| {
-                Ok(FileRow {
-                    id: row.read("id")?,
-                    version: row.read("version")?,
-                    kind: row.read("kind")?,
-                    name: row.read("name")?,
-                    uid: row.read("uid")?,
-                    gid: row.read("gid")?,
-                    perms: row.read("perms")?,
-                    size: row.read("size")?,
-                    sha512: row.read("sha512")?,
-                    encryption_key: row.read("encryption_key")?,
-                    compression: row.read("compression")?,
-                    accessed_at: row.read("accessed_at")?,
-                    created_at: row.read("created_at")?,
-                    updated_at: row.read("updated_at")?,
-                })
+        self.get_row("SELECT * FROM files WHERE id = :id", (":id", id), |row| {
+            Ok(FileRow {
+                id: row.read("id")?,
+                version: row.read("version")?,
+                kind: row.read("kind")?,
+                name: row.read("name")?,
+                uid: row.read("uid")?,
+                gid: row.read("gid")?,
+                perms: row.read("perms")?,
+                size: row.read("size")?,
+                sha512: row.read("sha512")?,
+                encryption_key: row.read("encryption_key")?,
+                compression: row.read("compression")?,
+                accessed_at: row.read("accessed_at")?,
+                created_at: row.read("created_at")?,
+                updated_at: row.read("updated_at")?,
             })
+        })
+    }
+
+    pub fn get_files(&self, ids: &[i64]) -> Result<Vec<FileRow>, AnyError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let filter = ids.iter().map(|_i| "?").join(",");
+        self.get_rows(&format!("SELECT * FROM files WHERE id in ({})", filter), ids, |row| {
+            Ok(FileRow {
+                id: row.read("id")?,
+                version: row.read("version")?,
+                kind: row.read("kind")?,
+                name: row.read("name")?,
+                uid: row.read("uid")?,
+                gid: row.read("gid")?,
+                perms: row.read("perms")?,
+                size: row.read("size")?,
+                sha512: row.read("sha512")?,
+                encryption_key: row.read("encryption_key")?,
+                compression: row.read("compression")?,
+                accessed_at: row.read("accessed_at")?,
+                created_at: row.read("created_at")?,
+                updated_at: row.read("updated_at")?,
+            })
+        })
     }
 
     pub fn get_file_by_sha512(&self, sha512: &str) -> Result<Option<FileRow>, AnyError> {
@@ -187,10 +247,19 @@ impl MetadataDB {
                     created_at: row.read("created_at")?,
                     updated_at: row.read("updated_at")?,
                 })
-            })
+            },
+        )
     }
 
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileRow>, AnyError> {
+        let id = self.get_file_id_by_path(path)?;
+        if id.is_none() {
+            return Ok(None);
+        }
+        Ok(self.get_file(id.unwrap())?)
+    }
+
+    pub fn get_file_id_by_path(&self, path: &str) -> Result<Option<i64>, AnyError> {
         let buff = PathBuf::from(path);
         let mut current = ROOT_DIRECTORY_ID;
 
@@ -208,7 +277,15 @@ impl MetadataDB {
             }
         }
 
-        self.get_file(current)
+        Ok(Some(current))
+    }
+
+    pub fn get_file_parent_id(&self, id: i64) -> Result<Option<i64>, AnyError> {
+        self.get_row(
+            "SELECT directory_file_id FROM directory_entries WHERE entry_file_id = :id order by id limit 1",
+            (":id", id),
+            |row| Ok(row.read("directory_file_id")?),
+        )
     }
 
     pub fn update_file(&self, file: &FileRow) -> Result<(), AnyError> {
@@ -257,7 +334,10 @@ impl MetadataDB {
 
     pub fn remove_file(&self, id: i64) -> Result<(), AnyError> {
         self.execute1("DELETE FROM files WHERE id = :id", (":id", id))?;
-        self.execute1("DELETE FROM directory_entries WHERE entry_file_id = :id OR directory_file_id = :id", (":id", id))?;
+        self.execute1(
+            "DELETE FROM directory_entries WHERE entry_file_id = :id OR directory_file_id = :id",
+            (":id", id),
+        )?;
         Ok(())
     }
 
@@ -269,7 +349,10 @@ impl MetadataDB {
     pub fn find_directory_entry(&self, directory_file_id: i64, name: &str) -> Result<Option<DirectoryEntry>, AnyError> {
         self.get_row(
             "SELECT * FROM directory_entries WHERE directory_file_id = :directory_file_id and name = :name",
-            &[(":directory_file_id", directory_file_id.to_string().as_str()), (":name", name)][..],
+            &[
+                (":directory_file_id", directory_file_id.to_string().as_str()),
+                (":name", name),
+            ][..],
             |row| {
                 Ok(DirectoryEntry {
                     id: row.read("id")?,
@@ -278,7 +361,8 @@ impl MetadataDB {
                     name: row.read("name")?,
                     kind: row.read("kind")?,
                 })
-            })
+            },
+        )
     }
 
     pub fn find_parent_directory(&self, file_id: i64) -> Result<Option<i64>, AnyError> {
@@ -324,7 +408,14 @@ impl MetadataDB {
         Ok(path)
     }
 
-    pub fn get_directory_entries(&self, directory_file_id: i64, limit: i64, offset: i64) -> Result<Vec<DirectoryEntry>, AnyError> {
+    /// Get a sublist of the directory entries for a given directory file id
+    /// The offset starts at 1
+    pub fn get_directory_entries_limit(
+        &self,
+        directory_file_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DirectoryEntry>, AnyError> {
         let query = "\
             SELECT * \
             FROM directory_entries \
@@ -337,7 +428,7 @@ impl MetadataDB {
             &[
                 (":directory_file_id", directory_file_id),
                 (":limit", limit),
-                (":offset", offset)
+                (":offset", offset),
             ][..],
             |row| {
                 Ok(DirectoryEntry {
@@ -347,7 +438,25 @@ impl MetadataDB {
                     name: row.read("name")?,
                     kind: row.read("kind")?,
                 })
+            },
+        )
+    }
+
+    pub fn get_directory_entries(&self, directory_file_id: i64) -> Result<Vec<DirectoryEntry>, AnyError> {
+        let query = "\
+            SELECT * \
+            FROM directory_entries \
+            WHERE directory_file_id = :directory_file_id";
+
+        self.get_rows(query, (":directory_file_id", directory_file_id), |row| {
+            Ok(DirectoryEntry {
+                id: row.read("id")?,
+                directory_file_id: row.read("directory_file_id")?,
+                entry_file_id: row.read("entry_file_id")?,
+                name: row.read("name")?,
+                kind: row.read("kind")?,
             })
+        })
     }
 
     pub fn update_directory_entry(&self, entry: &DirectoryEntry) -> Result<(), AnyError> {
@@ -377,6 +486,8 @@ impl MetadataDB {
         )?;
         let id = self.get_last_inserted_row_id()?;
 
+        self.execute1("INSERT INTO external_ids (internal_id, type) VALUES (:id, 1)", (":id", id))?;
+
         self.execute1(
             "UPDATE files SET version = version + 1 WHERE id = :id",
             (":id", entry.directory_file_id),
@@ -403,10 +514,8 @@ impl MetadataDB {
 
     pub fn get_tree(&self) -> Result<FsTreeRef, AnyError> {
         #[allow(clippy::unnecessary_cast)]
-        let entries: Vec<DirectoryEntry> = self.get_rows(
-            "SELECT * FROM directory_entries",
-            NO_BINDINGS.as_ref(),
-            |row| {
+        let entries: Vec<DirectoryEntry> =
+            self.get_rows("SELECT * FROM directory_entries", NO_BINDINGS.as_ref(), |row| {
                 Ok(DirectoryEntry {
                     id: row.read("id")?,
                     directory_file_id: row.read("directory_file_id")?,
@@ -473,7 +582,12 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn get_row<'l, 'q, T, M, R>(self: &'q MetadataDB, query: &str, bindings: T, mapper: M) -> Result<Option<R>, AnyError>
+    pub fn get_row<'l, 'q, T, M, R>(
+        self: &'q MetadataDB,
+        query: &str,
+        bindings: T,
+        mapper: M,
+    ) -> Result<Option<R>, AnyError>
     where
         T: Bindable + Clone,
         M: FnOnce(&Statement<'l>) -> Result<R, AnyError>,
@@ -489,7 +603,12 @@ impl MetadataDB {
         Ok(None)
     }
 
-    pub fn get_rows<'l, 'q, T, M, R>(self: &'q MetadataDB, query: &str, bindings: T, mapper: M) -> Result<Vec<R>, AnyError>
+    pub fn get_rows<'l, 'q, T, M, R>(
+        self: &'q MetadataDB,
+        query: &str,
+        bindings: T,
+        mapper: M,
+    ) -> Result<Vec<R>, AnyError>
     where
         T: Bindable + Clone,
         M: Fn(&Statement<'l>) -> Result<R, AnyError>,
@@ -564,7 +683,15 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute5<B0, B1, B2, B3, B4>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4) -> Result<(), AnyError>
+    pub fn execute5<B0, B1, B2, B3, B4>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -582,7 +709,16 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute6<B0, B1, B2, B3, B4, B5>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5) -> Result<(), AnyError>
+    pub fn execute6<B0, B1, B2, B3, B4, B5>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -602,7 +738,17 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute7<B0, B1, B2, B3, B4, B5, B6>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6) -> Result<(), AnyError>
+    pub fn execute7<B0, B1, B2, B3, B4, B5, B6>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -624,7 +770,18 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute8<B0, B1, B2, B3, B4, B5, B6, B7>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7) -> Result<(), AnyError>
+    pub fn execute8<B0, B1, B2, B3, B4, B5, B6, B7>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -648,7 +805,19 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute9<B0, B1, B2, B3, B4, B5, B6, B7, B8>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8) -> Result<(), AnyError>
+    pub fn execute9<B0, B1, B2, B3, B4, B5, B6, B7, B8>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -674,7 +843,20 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute10<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9) -> Result<(), AnyError>
+    pub fn execute10<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -702,7 +884,21 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute11<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10) -> Result<(), AnyError>
+    pub fn execute11<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+        b10: B10,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -732,7 +928,22 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute12<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11) -> Result<(), AnyError>
+    pub fn execute12<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+        b10: B10,
+        b11: B11,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -764,7 +975,23 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute13<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12) -> Result<(), AnyError>
+    pub fn execute13<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+        b10: B10,
+        b11: B11,
+        b12: B12,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -798,7 +1025,24 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute14<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12, b13: B13) -> Result<(), AnyError>
+    pub fn execute14<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+        b10: B10,
+        b11: B11,
+        b12: B12,
+        b13: B13,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -834,7 +1078,25 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute15<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12, b13: B13, b14: B14) -> Result<(), AnyError>
+    pub fn execute15<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+        b10: B10,
+        b11: B11,
+        b12: B12,
+        b13: B13,
+        b14: B14,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,
@@ -872,7 +1134,26 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn execute16<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14, B15>(&self, query: &str, b0: B0, b1: B1, b2: B2, b3: B3, b4: B4, b5: B5, b6: B6, b7: B7, b8: B8, b9: B9, b10: B10, b11: B11, b12: B12, b13: B13, b14: B14, b15: B15) -> Result<(), AnyError>
+    pub fn execute16<B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14, B15>(
+        &self,
+        query: &str,
+        b0: B0,
+        b1: B1,
+        b2: B2,
+        b3: B3,
+        b4: B4,
+        b5: B5,
+        b6: B6,
+        b7: B7,
+        b8: B8,
+        b9: B9,
+        b10: B10,
+        b11: B11,
+        b12: B12,
+        b13: B13,
+        b14: B14,
+        b15: B15,
+    ) -> Result<(), AnyError>
     where
         B0: Bindable + Clone,
         B1: Bindable + Clone,

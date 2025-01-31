@@ -10,30 +10,20 @@ use aws_sdk_s3::Client;
 use aws_smithy_types::retry::RetryConfig;
 use aws_types::region::Region;
 use log::debug;
-use std::rc::Rc;
+use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 
 pub struct S3ObjectStorage {
-    pub config: Rc<StorageConfig>,
+    pub config: Arc<StorageConfig>,
     pub client: Client,
     pub rt: Runtime,
 }
 
 impl S3ObjectStorage {
-    pub fn new(config: Rc<StorageConfig>) -> Self {
-        let rt = Builder::new_current_thread()
-            .enable_time()
-            .enable_io()
-            .build()
-            .unwrap();
+    pub fn new(config: Arc<StorageConfig>) -> Self {
+        let rt = Builder::new_current_thread().enable_time().enable_io().build().unwrap();
 
-        let creds = Credentials::new(
-            &config.s3_access_key,
-            &config.s3_secret_key,
-            None,
-            None,
-            "config.yml",
-        );
+        let creds = Credentials::new(&config.s3_access_key, &config.s3_secret_key, None, None, "config.yml");
 
         let s3_config = aws_types::sdk_config::Builder::default()
             .retry_config(RetryConfig::standard().with_max_attempts(5))
@@ -51,9 +41,7 @@ impl S3ObjectStorage {
         let path = self.config.path_of(&info);
         let basename = self.config.s3_base_path.trim_end_matches('/');
         let filename = path.trim_start_matches('/');
-        format!("{}/{}", basename, filename)
-            .trim_matches('/')
-            .to_string()
+        format!("{}/{}", basename, filename).trim_matches('/').to_string()
     }
 }
 
@@ -64,13 +52,7 @@ impl ObjectStorage for S3ObjectStorage {
         debug!("Get: {:?} ({:?})", &path, bucket_name);
 
         self.rt.block_on(async {
-            let res = self
-                .client
-                .get_object()
-                .bucket(bucket_name)
-                .key(&path)
-                .send()
-                .await?;
+            let res = self.client.get_object().bucket(bucket_name).key(&path).send().await?;
 
             let content = res.body.collect().await?.to_vec();
             Ok(content)
@@ -121,10 +103,7 @@ impl ObjectStorage for S3ObjectStorage {
         let prev_path = self.path(prev_info);
         let new_path = self.path(new_info);
         let bucket_name = &self.config.s3_bucket;
-        debug!(
-            "Rename: {:?} -> {:?} ({:?})",
-            &prev_path, &new_path, bucket_name
-        );
+        debug!("Rename: {:?} -> {:?} ({:?})", &prev_path, &new_path, bucket_name);
 
         self.rt.block_on(async {
             self.client
@@ -152,11 +131,7 @@ impl ObjectStorage for S3ObjectStorage {
         debug!("Nuke: {:?} ({:?})", &path, bucket_name);
 
         // https://github.com/awslabs/aws-sdk-rust/blob/22f71f0e82804f709469f21bdd389f5d56cf8ed1/examples/examples/s3/src/s3-service-lib.rs#L31
-        pub async fn delete_objects(
-            client: &Client,
-            bucket_name: &str,
-            base_path: &str,
-        ) -> Result<(), Error> {
+        pub async fn delete_objects(client: &Client, bucket_name: &str, base_path: &str) -> Result<(), Error> {
             loop {
                 let objects = client
                     .list_objects_v2()
@@ -205,5 +180,9 @@ impl ObjectStorage for S3ObjectStorage {
             delete_objects(&self.client, &bucket_name, &path).await?;
             Ok(())
         })
+    }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self::new(self.config.clone()))
     }
 }

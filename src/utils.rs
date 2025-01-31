@@ -1,5 +1,6 @@
 use std::ops::{Add, Sub};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use chrono::{DateTime};
 
 pub fn humanize_bytes_binary(value: usize) -> String {
     use ::core::fmt::Write;
@@ -57,6 +58,10 @@ pub fn system_time_from_timestamp(value: i64) -> SystemTime {
 
 pub fn timestamp_from_system_time(value: SystemTime) -> i64 {
     value.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+pub fn format_timestamp(value: i64) -> String {
+    DateTime::from_timestamp(value, 0u32).unwrap().to_rfc3339()
 }
 
 pub fn ask_for_confirmation(msg: &str) -> bool {

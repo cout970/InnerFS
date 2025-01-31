@@ -1,0 +1,19 @@
+{
+  "name": "innerfs-webdav",
+  "version": "1.0.0",
+  "description": "User interface for webdav",
+  "main": "src/main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "author": "cout970",
+  "license": "MIT",
+  "devDependencies": {
+    "sass": "^1.83.4",
+    "vite": "^6.0.11",
+    "vite-plugin-singlefile": "^2.1.0"
+  }
+}

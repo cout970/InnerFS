@@ -60,4 +60,11 @@ impl ObjectStorage for CompressedObjectStorage {
         self.proxy.nuke()?;
         Ok(())
     }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self {
+            proxy: self.proxy.clone(),
+            level: self.level,
+        })
+    }
 }

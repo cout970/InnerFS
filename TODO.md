@@ -28,12 +28,13 @@
 - Generate index from existing folder
 - Add option to change the encryption key
 - Sync between machines/instances
-- Sync with folder, like rsync
+- Sync with folder, like rsync (or zsync)
 - Encryption of index.db
 - Docker image
 - Export to sqlar, even if the files are stored in S3
 - Export to .innerfs file, that is a sqlar file with the index and the files
 - Mount .innerfs file with file explorer with double click, like any zip file
 - Automatic backups of the database, sqlite VACUUM INTO 'backup.db', config for periodicity
+- Filesystem snapshots (commits)
 
 ### Known Bugs

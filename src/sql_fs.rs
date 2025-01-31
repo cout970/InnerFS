@@ -1,21 +1,24 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
-
+use std::sync::Arc;
 use crate::config::Config;
 use crate::metadata_db::{
     DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR,
 };
 use crate::obj_storage::{ObjInfo, PathGenerator};
-use crate::storage::{Storage};
+use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, EROFS, O_RDONLY, O_RDWR, O_WRONLY};
+use libc::{
+    EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, EROFS, O_RDONLY, O_RDWR,
+    O_WRONLY,
+};
 
 pub struct SqlFileSystem {
     pub sql: Rc<MetadataDB>,
-    pub config: Rc<Config>,
+    pub config: Arc<Config>,
     pub storage: Box<dyn Storage>,
 }
 
@@ -26,7 +29,7 @@ pub struct SqlFileSystemError {
 }
 
 impl SqlFileSystem {
-    pub fn new(sql: Rc<MetadataDB>, config: Rc<Config>, storage: Box<dyn Storage>) -> Self {
+    pub fn new(sql: Rc<MetadataDB>, config: Arc<Config>, storage: Box<dyn Storage>) -> Self {
         Self {
             sql,
             config,
@@ -287,6 +290,41 @@ impl SqlFileSystem {
 
             Ok(new_id)
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn get_directory_files(&mut self, parent: i64) -> Result<Vec<FileRow>, SqlFileSystemError> {
+        let entries = self.get_directory_entries(parent)?;
+        let file_ids: Vec<i64> = entries.into_iter().map(|i| i.entry_file_id).collect();
+        let files = self.sql.get_files(&file_ids)?;
+        Ok(files)
+    }
+
+    pub fn get_directory_entries(&mut self, parent: i64) -> Result<Vec<DirectoryEntry>, SqlFileSystemError> {
+        let dir_file = self.get_file_or_err(parent)?;
+
+        if dir_file.kind != FILE_KIND_DIRECTORY {
+            return error(ENOTDIR, anyhow!("Not a directory: {}", parent));
+        }
+
+        if self.config.update_access_time {
+            self.sql.file_set_access_time(parent, current_timestamp())?;
+        }
+
+        let entries = self.sql.get_directory_entries(dir_file.id)?;
+        Ok(entries)
+    }
+
+    pub fn get_file_by_path(&mut self, path: &str) -> Result<Option<FileRow>, SqlFileSystemError> {
+        Ok(self.sql.get_file_by_path(path)?)
+    }
+
+    pub fn get_file_id_by_path(&mut self, path: &str) -> Result<Option<i64>, SqlFileSystemError> {
+        Ok(self.sql.get_file_id_by_path(path)?)
+    }
+
+    pub fn get_file_parent_id(&mut self, id: i64) -> Result<Option<i64>, SqlFileSystemError> {
+        Ok(self.sql.get_file_parent_id(id)?)
     }
 
     pub fn lookup(
@@ -588,7 +626,7 @@ impl SqlFileSystem {
 
         let entries = self
             .sql
-            .get_directory_entries(dir_entry.entry_file_id, 10, 0)?;
+            .get_directory_entries_limit(dir_entry.entry_file_id, 10, 0)?;
 
         // Cannot delete non-empty directory
         if entries.len() > 2 {
@@ -675,7 +713,8 @@ impl SqlFileSystem {
     pub fn open(&mut self, id: i64, flags: u32) -> Result<(), SqlFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
 
-        if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0) {
+        if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0)
+        {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
 
@@ -773,7 +812,7 @@ impl SqlFileSystem {
         id: i64,
         offset: i64,
     ) -> Result<Vec<DirectoryEntry>, SqlFileSystemError> {
-        let entries = self.sql.get_directory_entries(id, 1024, offset)?;
+        let entries = self.sql.get_directory_entries_limit(id, 1024, offset)?;
 
         if self.config.update_access_time {
             self.sql.file_set_access_time(id, current_timestamp())?;
@@ -784,13 +823,17 @@ impl SqlFileSystem {
 
     pub fn cleanup(&mut self) -> Result<(), SqlFileSystemError> {
         let sql = self.sql.clone();
-        self.storage.cleanup(Rc::new(move |info, test|
+        self.storage.cleanup(Rc::new(move |info, test| {
             Self::file_is_in_use(&sql, info, test)
-        ))?;
+        }))?;
         Ok(())
     }
 
-    fn file_is_in_use(sql: &Rc<MetadataDB>, info: &ObjInfo, test: PathGenerator) -> Result<bool, AnyError> {
+    fn file_is_in_use(
+        sql: &Rc<MetadataDB>,
+        info: &ObjInfo,
+        test: PathGenerator,
+    ) -> Result<bool, AnyError> {
         let exists = match test {
             PathGenerator::Path => sql.get_file_by_path(&info.full_path)?.is_some(),
             PathGenerator::Sha512 => sql.get_file_by_sha512(&info.sha512)?.is_some(),
@@ -848,6 +891,15 @@ impl SqlFileSystem {
                 .context("Database error")?;
         }
         res
+    }
+
+    #[allow(dead_code)]
+    pub fn clone(&self) -> Self {
+        Self {
+            sql: self.sql.clone(),
+            config: self.config.clone(),
+            storage: self.storage.clone(),
+        }
     }
 }
 

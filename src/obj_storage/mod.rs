@@ -11,6 +11,7 @@ use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use crate::obj_storage::versioned_object_storage::VersionedObjectStorage;
 
 // Storage backends
@@ -71,6 +72,7 @@ pub trait ObjectStorage {
     fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError>;
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError>;
     fn nuke(&mut self) -> Result<(), AnyError>;
+    fn clone(&self) -> Box<dyn ObjectStorage>;
 }
 
 impl Display for ObjInfo {
@@ -99,7 +101,7 @@ impl ObjInfo {
 }
 
 pub fn create_object_storage(
-    config: Rc<StorageConfig>,
+    config: Arc<StorageConfig>,
     sql: Rc<MetadataDB>,
 ) -> Box<dyn ObjectStorage> {
     let mut obj_storage: Box<dyn ObjectStorage> = match &config.storage_backend {

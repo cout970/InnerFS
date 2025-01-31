@@ -234,4 +234,12 @@ impl Storage for StorageInterface {
         self.pending_remove.clear();
         self.obj_storage.nuke()
     }
+
+    fn clone(&self) -> Box<dyn Storage> {
+        Box::new(Self {
+            obj_storage: self.obj_storage.clone(),
+            cache: HashMap::new(),
+            pending_remove: HashSet::new(),
+        })
+    }
 }

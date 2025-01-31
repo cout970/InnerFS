@@ -30,4 +30,8 @@ impl ObjectStorage for DebugObjectStorage {
         info!("Nuke");
         Ok(())
     }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(DebugObjectStorage {})
+    }
 }

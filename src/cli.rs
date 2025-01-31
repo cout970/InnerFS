@@ -1,6 +1,6 @@
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
-use clap::{Parser, Subcommand, ValueEnum};
 
 /// Utility to mount a shadow filesystem, supports encryption and multiple storage backends: S3, Sqlar and FileSystem
 #[derive(Parser)]
@@ -50,6 +50,13 @@ pub enum Commands {
     Stats,
     /// Verify integrity of the filesystem data
     Verify,
+    /// Start a webdav server
+    Webdav {
+        ///
+        /// If set, the server will listen on this address and port, default value: 127.0.0.1:8080
+        #[arg(short, long, value_name = "ADDRESS")]
+        address: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

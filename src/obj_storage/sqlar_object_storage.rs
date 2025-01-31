@@ -5,10 +5,12 @@ use crate::storage::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
 use std::rc::Rc;
+use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct SqlarObjectStorage {
     pub sql: Rc<MetadataDB>,
-    pub config: Rc<StorageConfig>,
+    pub config: Arc<StorageConfig>,
 }
 
 // https://sqlite.org/sqlar.html
@@ -80,6 +82,13 @@ impl ObjectStorage for SqlarObjectStorage {
         debug!("Nuke");
         self.sql.execute0("DELETE FROM sqlar")?;
         Ok(())
+    }
+
+    fn clone(&self) -> Box<dyn ObjectStorage> {
+        Box::new(Self {
+            sql: self.sql.clone(),
+            config: self.config.clone(),
+        })
     }
 }
 

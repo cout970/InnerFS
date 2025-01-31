@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="color-scheme" content="dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Webdav</title>
+  <script type="module" crossorigin>(function(){const i=document.createElement("link").relList;if(i&&i.supports&&i.supports("modulepreload"))return;for(const t of document.querySelectorAll('link[rel="modulepreload"]'))e(t);new MutationObserver(t=>{for(const o of t)if(o.type==="childList")for(const s of o.addedNodes)s.tagName==="LINK"&&s.rel==="modulepreload"&&e(s)}).observe(document,{childList:!0,subtree:!0});function a(t){const o={};return t.integrity&&(o.integrity=t.integrity),t.referrerPolicy&&(o.referrerPolicy=t.referrerPolicy),t.crossOrigin==="use-credentials"?o.credentials="include":t.crossOrigin==="anonymous"?o.credentials="omit":o.credentials="same-origin",o}function e(t){if(t.ep)return;t.ep=!0;const o=a(t);fetch(t.href,o)}})();const m=window.location.href,u=`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-file-earmark" viewBox="0 0 16 16">
+  <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5z"/>
+</svg>`,p=`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-folder" viewBox="0 0 16 16">
+  <path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.826a2 2 0 0 1-1.991-1.819l-.637-7a2 2 0 0 1 .342-1.31zM2.19 4a1 1 0 0 0-.996 1.09l.637 7a1 1 0 0 0 .995.91h10.348a1 1 0 0 0 .995-.91l.637-7A1 1 0 0 0 13.81 4zm4.69-1.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139q.323-.119.684-.12h5.396z"/>
+</svg>`,g=`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-return-left" viewBox="0 0 16 16">
+  <path fill-rule="evenodd" d="M14.5 1.5a.5.5 0 0 1 .5.5v4.8a2.5 2.5 0 0 1-2.5 2.5H2.707l3.347 3.346a.5.5 0 0 1-.708.708l-4.2-4.2a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 8.3H12.5A1.5 1.5 0 0 0 14 6.8V2a.5.5 0 0 1 .5-.5"/>
+</svg>`;async function h(n){var s;const i=n.endsWith("/")?n.slice(0,-1):n,a=await fetch(m+i,{method:"PROPFIND",headers:{Depth:"1"},body:'<?xml version="1.0" encoding="utf-8" ?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>'}),t=new DOMParser().parseFromString(await a.text(),"text/xml"),o=[];for(const c of t.getElementsByTagName("D:response")){let l=c.getElementsByTagName("D:prop")[0];const r={href:c.childNodes[0].textContent,name:l.getElementsByTagName("D:displayname")[0].textContent,kind:l.getElementsByTagName("D:resourcetype")[0].childNodes.length>0?"directory":"file",size:l.getElementsByTagName("D:getcontentlength")[0].textContent,etag:l.getElementsByTagName("D:getetag")[0].textContent,content_type:((s=l.getElementsByTagName("D:getcontenttype")[0])==null?void 0:s.textContent)??"application/octet-stream",creation_date:l.getElementsByTagName("D:creationdate")[0].textContent,last_modified:l.getElementsByTagName("D:getlastmodified")[0].textContent};r.href===`/${n}/`&&(r.name="."),!(r.name==="."||r.name===".."||r.href==="/")&&o.push(r)}return o.sort((c,l)=>{let r=c.kind.localeCompare(l.kind);return r!==0?r:c.name.localeCompare(l.name)}),o}async function y(n){const i=document.querySelector(".file-list");i.style.display="block";const a=i.querySelector("tbody");a.innerHTML="";for(let e of n){const t=document.createElement("tr"),o=document.createElement("td"),s=document.createElement("td"),c=document.createElement("td"),l=document.createElement("td"),r=document.createElement("a");r.classList.add("file-link"),e.kind==="directory"?(r.innerHTML=e.name===".."?g:p,r.append(document.createTextNode(e.name+"/")),r.setAttribute("href","#?path="+encodeURIComponent(e.href))):(r.innerHTML=u,r.append(document.createTextNode(e.name)),r.setAttribute("href",new URL(e.href,m).toString()),r.setAttribute("target","_blank")),r.onclick=f=>{e.kind==="directory"&&(f.preventDefault(),d(e.href).then(void 0))},o.appendChild(r),s.textContent=v(e.size),c.textContent=e.etag.slice(0,8),l.textContent=e.last_modified,t.appendChild(o),t.appendChild(s),t.appendChild(c),t.appendChild(l),a.appendChild(t)}}async function w(n){const i=document.querySelector(".current-path");i.innerHTML="";const a=n.split("/").filter(t=>t!=="");let e="";for(let t of a){e=e+"/"+t;const o=e===""?"/":e,s=document.createElement("a");s.classList.add("path-segment"),s.setAttribute("href","#?path="+encodeURIComponent(o)),s.textContent=t,s.onclick=c=>{c.preventDefault(),d(o).then(void 0)},i.appendChild(s)}}async function d(n){n=n.startsWith("/")?n.slice(1):n,n=n===""||n===".."||n==="/.."?"/":n;let i=[];for(let e of n.split("/"))e===".."?i.length&&i.pop():e!=="."&&i.push(e);n=i.length?i.join("/"):"/";let a=await h(n);await y(a),await w(n)}function v(n){if(n==="0")return"-";const i=["B","KB","MB","GB","TB"];let a=0,e=parseInt(n);for(;e>1024;)e/=1024,a++;return e.toFixed(2)+" "+i[a]}async function _(){await d("/"),document.querySelector(".loading").remove()}_().then(void 0);</script>
+  <style rel="stylesheet" crossorigin>*{box-sizing:border-box}html,body{margin:0;padding:0;font-family:Arial,sans-serif;background:#333;color:#c9c9c9}.app{display:flex;width:100%;min-height:100vh;justify-content:center;align-items:center;padding:1rem}.file-list{background:#232323;color:#c9c9c9;padding:2rem;border-radius:1rem;min-height:80vh}.file-list .current-path{margin-bottom:1rem;display:flex;flex-flow:row wrap;width:100%;gap:.5rem}.file-list .current-path .path-segment{display:block;padding:.5rem;border-radius:.5rem;background:#111;min-width:2rem;text-align:center;color:#c9c9c9;text-decoration:none;font-weight:700}.file-list .file-link{color:#eee;text-decoration:none;font-weight:700}.file-list .file-link .bi{margin-right:.5rem;vertical-align:middle}table{border-collapse:collapse;min-width:50vw}table th,table td{text-align:left;padding:.5rem;border:none}table tr{border:none}table thead>tr,table tr:not(:last-child){border-bottom:1px solid #3B3B3B}</style>
+</head>
+<body>
+
+<div class="app">
+    <div class="loading">Loading...</div>
+    <div class="file-list" style="display: none">
+        <div class="current-path">
+            <a class="path-segment" href="#?path=/">/</a>
+        </div>
+
+        <table>
+            <thead>
+            <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Etag</th>
+                <th>Modified</th>
+            </tr>
+            </thead>
+            <tbody>
+
+            </tbody>
+        </table>
+    </div>
+</div>
+
+</body>
+</html>
