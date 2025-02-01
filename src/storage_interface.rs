@@ -163,6 +163,10 @@ impl Storage for StorageInterface {
     }
 
     fn flush(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
+        if !self.cache.contains_key(&file.id) {
+            return Ok(false);
+        }
+
         let mut modified = false;
         let row = self.cache.get_mut(&file.id).unwrap();
 

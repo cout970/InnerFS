@@ -26,6 +26,7 @@ pub struct FileRow {
     pub version: i64,
     pub kind: i64,
     pub name: String,
+    pub external_id: String,
     pub uid: i64,
     pub gid: i64,
     pub perms: i64,
@@ -79,7 +80,6 @@ impl MetadataDB {
         self.connection.execute(include_str!("./sql/directory_entries.sql"))?;
         self.connection.execute(include_str!("./sql/file_changes.sql"))?;
         self.connection.execute(include_str!("./sql/sqlar.sql"))?;
-        self.connection.execute(include_str!("./sql/external_ids.sql"))?;
 
         // Schema version
         let version = self.get_row(
@@ -174,9 +174,6 @@ impl MetadataDB {
         )?;
 
         let id = self.get_last_inserted_row_id()?;
-
-        self.execute1("INSERT INTO external_ids (internal_id, type) VALUES (:id, 0)", (":id", id))?;
-
         Ok(id)
     }
 
@@ -187,6 +184,7 @@ impl MetadataDB {
                 version: row.read("version")?,
                 kind: row.read("kind")?,
                 name: row.read("name")?,
+                external_id: row.read("external_id")?,
                 uid: row.read("uid")?,
                 gid: row.read("gid")?,
                 perms: row.read("perms")?,
@@ -212,6 +210,7 @@ impl MetadataDB {
                 version: row.read("version")?,
                 kind: row.read("kind")?,
                 name: row.read("name")?,
+                external_id: row.read("external_id")?,
                 uid: row.read("uid")?,
                 gid: row.read("gid")?,
                 perms: row.read("perms")?,
@@ -236,6 +235,7 @@ impl MetadataDB {
                     version: row.read("version")?,
                     kind: row.read("kind")?,
                     name: row.read("name")?,
+                    external_id: row.read("external_id")?,
                     uid: row.read("uid")?,
                     gid: row.read("gid")?,
                     perms: row.read("perms")?,
@@ -485,8 +485,6 @@ impl MetadataDB {
             (":kind", entry.kind),
         )?;
         let id = self.get_last_inserted_row_id()?;
-
-        self.execute1("INSERT INTO external_ids (internal_id, type) VALUES (:id, 1)", (":id", id))?;
 
         self.execute1(
             "UPDATE files SET version = version + 1 WHERE id = :id",

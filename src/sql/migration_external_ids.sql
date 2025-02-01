@@ -1,9 +1,15 @@
--- migrate existing data
-insert or ignore into external_ids (internal_id, type)
-select id, 0
-from files;
+alter table files
+    add column external_id text not null default (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+                                                  '-4' ||
+                                                  substr(lower(hex(randomblob(2))), 2) || '-' ||
+                                                  substr('89ab', abs(random()) % 4 + 1, 1) ||
+                                                  substr(lower(hex(randomblob(2))), 2) || '-' ||
+                                                  lower(hex(randomblob(6))));
 
--- migrate existing data
-insert or ignore into external_ids (internal_id, type)
-select id, 1
-from directory_entries;
+alter table directory_entries
+    add column external_id text not null default (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) ||
+                                                  '-4' ||
+                                                  substr(lower(hex(randomblob(2))), 2) || '-' ||
+                                                  substr('89ab', abs(random()) % 4 + 1, 1) ||
+                                                  substr(lower(hex(randomblob(2))), 2) || '-' ||
+                                                  lower(hex(randomblob(6))));
