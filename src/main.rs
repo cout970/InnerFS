@@ -1,5 +1,5 @@
 use crate::config::{check_config_changes, read_config, Config};
-use crate::fuse_fs::FuseFileSystem;
+use crate::fuse_file_system::FuseFileSystem;
 use crate::metadata_db::{MetadataDB, NO_BINDINGS};
 use crate::obj_storage::{create_object_storage, ObjectStorage};
 use anyhow::{anyhow, Context};
@@ -19,12 +19,11 @@ mod api;
 mod cli;
 mod config;
 mod fs_tree;
-mod fuse_fs;
+mod fuse_file_system;
 mod metadata_db;
 mod obj_storage;
 mod semver;
-mod sql_fs;
-mod storage;
+mod inner_file_system;
 mod storage_interface;
 mod utils;
 
@@ -32,7 +31,7 @@ use crate::api::start_webdav_server;
 use crate::cli::{Cli, Commands, FileExportFormat, IndexExportFormat};
 use crate::fs_tree::{FsTree, FsTreeKind};
 use crate::obj_storage::replicated_object_storage::ReplicatedObjectStorage;
-use crate::sql_fs::SqlFileSystem;
+use crate::inner_file_system::InnerFileSystem;
 use crate::storage_interface::StorageInterface;
 use crate::utils::humanize_bytes_binary;
 use clap::Parser;
@@ -133,7 +132,7 @@ fn start_cli() {
     }
 }
 
-fn init_fs(config: Arc<Config>) -> SqlFileSystem {
+fn init_fs(config: Arc<Config>) -> InnerFileSystem {
     let sql = Rc::new(MetadataDB::open(&config.database_file));
     sql.run_migrations().expect("Unable to run migrations");
 
@@ -155,9 +154,9 @@ fn init_fs(config: Arc<Config>) -> SqlFileSystem {
     }
 
     // Wrap the storage backend in a StorageInterface, which provides a higher-level API
-    let storage = Box::new(StorageInterface::new(obj_storage));
+    let storage = StorageInterface::new(obj_storage);
 
-    SqlFileSystem::new(sql.clone(), config, storage)
+    InnerFileSystem::new(sql.clone(), config, storage)
 }
 
 fn check_config(config: Arc<Config>, sql: Rc<MetadataDB>) {
@@ -172,7 +171,7 @@ fn check_config(config: Arc<Config>, sql: Rc<MetadataDB>) {
 }
 
 /// Mount the filesystem
-fn mount(fs: SqlFileSystem) -> Result<(), AnyError> {
+fn mount(fs: InnerFileSystem) -> Result<(), AnyError> {
     let mount_point = fs.config.mount_point.clone();
 
     // Create a FUSE proxy filesystem to access the StorageInterface
@@ -220,7 +219,7 @@ fn mount(fs: SqlFileSystem) -> Result<(), AnyError> {
 }
 
 /// Delete all data stored
-fn nuke(mut fs: SqlFileSystem, force: bool) -> Result<(), AnyError> {
+fn nuke(mut fs: InnerFileSystem, force: bool) -> Result<(), AnyError> {
     if !force {
         warn!("Are you sure you want to delete all data?");
         if !ask_for_confirmation("This operation is irreversible. Type 'yes' or 'y' to proceed") {
@@ -240,7 +239,7 @@ fn nuke(mut fs: SqlFileSystem, force: bool) -> Result<(), AnyError> {
 }
 
 /// Export the file metadata index to a file
-fn export_index(fs: SqlFileSystem, format: IndexExportFormat) -> Result<(), AnyError> {
+fn export_index(fs: InnerFileSystem, format: IndexExportFormat) -> Result<(), AnyError> {
     info!("Exporting index");
     let tree = fs.sql.get_tree()?;
 
@@ -256,7 +255,7 @@ fn export_index(fs: SqlFileSystem, format: IndexExportFormat) -> Result<(), AnyE
 }
 
 /// Export the whole filesystem to a file
-fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathBuf) -> Result<(), AnyError> {
+fn export_files(mut fs: InnerFileSystem, format: FileExportFormat, mut path: PathBuf) -> Result<(), AnyError> {
     info!("Exporting files to {:?}", &path);
     let tree = fs.sql.get_tree()?;
 
@@ -338,7 +337,7 @@ fn export_files(mut fs: SqlFileSystem, format: FileExportFormat, mut path: PathB
 }
 
 /// Print stats about the filesystem
-fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
+fn stats(fs: InnerFileSystem) -> Result<(), AnyError> {
     let [total, directories, regular] = fs
         .sql
         .get_row(
@@ -436,7 +435,7 @@ fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
 }
 
 /// Verify integrity of the filesystem contents
-fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
+fn verify(mut fs: InnerFileSystem) -> Result<(), AnyError> {
     let total = fs
         .sql
         .get_row(

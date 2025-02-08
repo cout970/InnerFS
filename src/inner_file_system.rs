@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::metadata_db::{DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
 use crate::obj_storage::{ObjInfo, PathGenerator};
-use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
@@ -10,25 +9,26 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use std::sync::Arc;
+use crate::storage_interface::StorageInterface;
 
-pub struct SqlFileSystem {
+pub struct InnerFileSystem {
     pub sql: Rc<MetadataDB>,
     pub config: Arc<Config>,
-    pub storage: Box<dyn Storage>,
+    pub storage: StorageInterface,
 }
 
 #[derive(Debug)]
-pub struct SqlFileSystemError {
+pub struct InnerFileSystemError {
     pub code: i32,
     pub error: AnyError,
 }
 
-impl SqlFileSystem {
-    pub fn new(sql: Rc<MetadataDB>, config: Arc<Config>, storage: Box<dyn Storage>) -> Self {
+impl InnerFileSystem {
+    pub fn new(sql: Rc<MetadataDB>, config: Arc<Config>, storage: StorageInterface) -> Self {
         Self { sql, config, storage }
     }
 
-    pub fn read_all(&mut self, id: i64) -> Result<Vec<u8>, SqlFileSystemError> {
+    pub fn read_all(&mut self, id: i64) -> Result<Vec<u8>, InnerFileSystemError> {
         const BLOCK_SIZE: usize = 65536; // 64kb
 
         let mut file = self.get_file_or_err(id)?;
@@ -73,7 +73,7 @@ impl SqlFileSystem {
         Ok(complete_buff)
     }
 
-    pub fn write_all(&mut self, id: i64, contents: &[u8]) -> Result<(), SqlFileSystemError> {
+    pub fn write_all(&mut self, id: i64, contents: &[u8]) -> Result<(), InnerFileSystemError> {
         const BLOCK_SIZE: usize = 65536; // 64kb
 
         let mut file = self.get_file_or_err(id)?;
@@ -131,7 +131,7 @@ impl SqlFileSystem {
         name: &str,
         new_parent_id: i64,
         new_name: &str,
-    ) -> Result<(), SqlFileSystemError> {
+    ) -> Result<(), InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -193,14 +193,13 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn copy_file(
         &mut self,
         parent_id: i64,
         name: &str,
         new_parent_id: i64,
         new_name: &str,
-    ) -> Result<i64, SqlFileSystemError> {
+    ) -> Result<i64, InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -273,14 +272,14 @@ impl SqlFileSystem {
     }
 
     #[allow(dead_code)]
-    pub fn get_directory_files(&mut self, parent: i64) -> Result<Vec<FileRow>, SqlFileSystemError> {
+    pub fn get_directory_files(&mut self, parent: i64) -> Result<Vec<FileRow>, InnerFileSystemError> {
         let entries = self.get_directory_entries(parent)?;
         let file_ids: Vec<i64> = entries.into_iter().map(|i| i.entry_file_id).collect();
         let files = self.sql.get_files(&file_ids)?;
         Ok(files)
     }
 
-    pub fn get_directory_entries(&mut self, parent: i64) -> Result<Vec<DirectoryEntry>, SqlFileSystemError> {
+    pub fn get_directory_entries(&mut self, parent: i64) -> Result<Vec<DirectoryEntry>, InnerFileSystemError> {
         let dir_file = self.get_file_or_err(parent)?;
 
         if dir_file.kind != FILE_KIND_DIRECTORY {
@@ -295,19 +294,19 @@ impl SqlFileSystem {
         Ok(entries)
     }
 
-    pub fn get_file_by_path(&mut self, path: &str) -> Result<Option<FileRow>, SqlFileSystemError> {
+    pub fn get_file_by_path(&mut self, path: &str) -> Result<Option<FileRow>, InnerFileSystemError> {
         Ok(self.sql.get_file_by_path(path)?)
     }
 
-    pub fn get_file_id_by_path(&mut self, path: &str) -> Result<Option<i64>, SqlFileSystemError> {
+    pub fn get_file_id_by_path(&mut self, path: &str) -> Result<Option<i64>, InnerFileSystemError> {
         Ok(self.sql.get_file_id_by_path(path)?)
     }
 
-    pub fn get_file_parent_id(&mut self, id: i64) -> Result<Option<i64>, SqlFileSystemError> {
+    pub fn get_file_parent_id(&mut self, id: i64) -> Result<Option<i64>, InnerFileSystemError> {
         Ok(self.sql.get_file_parent_id(id)?)
     }
 
-    pub fn lookup(&mut self, parent: i64, name: &str) -> Result<Option<FileRow>, SqlFileSystemError> {
+    pub fn lookup(&mut self, parent: i64, name: &str) -> Result<Option<FileRow>, InnerFileSystemError> {
         let dir_file = self.get_file_or_err(parent)?;
 
         if dir_file.kind != FILE_KIND_DIRECTORY {
@@ -329,7 +328,7 @@ impl SqlFileSystem {
         Ok(Some(file))
     }
 
-    pub fn getattr(&mut self, id: i64) -> Result<FileRow, SqlFileSystemError> {
+    pub fn getattr(&mut self, id: i64) -> Result<FileRow, InnerFileSystemError> {
         self.get_file_or_err(id)
     }
 
@@ -343,7 +342,7 @@ impl SqlFileSystem {
         atime: Option<i64>,
         mtime: Option<i64>,
         crtime: Option<i64>,
-    ) -> Result<FileRow, SqlFileSystemError> {
+    ) -> Result<FileRow, InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -388,7 +387,7 @@ impl SqlFileSystem {
         uid: u32,
         gid: u32,
         mode: u32,
-    ) -> Result<FileRow, SqlFileSystemError> {
+    ) -> Result<FileRow, InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -472,7 +471,7 @@ impl SqlFileSystem {
         uid: u32,
         gid: u32,
         mode: u32,
-    ) -> Result<FileRow, SqlFileSystemError> {
+    ) -> Result<FileRow, InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -545,7 +544,7 @@ impl SqlFileSystem {
         self.get_file_or_err(id)
     }
 
-    pub fn unlink(&mut self, parent: i64, name: &str) -> Result<(), SqlFileSystemError> {
+    pub fn unlink(&mut self, parent: i64, name: &str) -> Result<(), InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -574,7 +573,7 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    pub fn rmdir(&mut self, parent: i64, name: &str) -> Result<(), SqlFileSystemError> {
+    pub fn rmdir(&mut self, parent: i64, name: &str) -> Result<(), InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -609,7 +608,7 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    pub fn rename(&mut self, parent: i64, old_name: &str, new_name: &str) -> Result<(), SqlFileSystemError> {
+    pub fn rename(&mut self, parent: i64, old_name: &str, new_name: &str) -> Result<(), InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -665,7 +664,7 @@ impl SqlFileSystem {
         })
     }
 
-    pub fn open(&mut self, id: i64, flags: u32) -> Result<(), SqlFileSystemError> {
+    pub fn open(&mut self, id: i64, flags: u32) -> Result<(), InnerFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
 
         if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0) {
@@ -697,7 +696,7 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    pub fn read(&mut self, id: i64, offset: i64, size: usize) -> Result<Vec<u8>, SqlFileSystemError> {
+    pub fn read(&mut self, id: i64, offset: i64, size: usize) -> Result<Vec<u8>, InnerFileSystemError> {
         let file = self.get_file_or_err(id)?;
 
         let mut buff = vec![0u8; size];
@@ -706,7 +705,7 @@ impl SqlFileSystem {
         Ok(buff)
     }
 
-    pub fn write(&mut self, id: i64, offset: i64, data: &[u8]) -> Result<usize, SqlFileSystemError> {
+    pub fn write(&mut self, id: i64, offset: i64, data: &[u8]) -> Result<usize, InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -716,7 +715,7 @@ impl SqlFileSystem {
         Ok(len)
     }
 
-    pub fn flush(&mut self, id: i64) -> Result<(), SqlFileSystemError> {
+    pub fn flush(&mut self, id: i64) -> Result<(), InnerFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
         let modified = self.storage.flush(&mut file)?;
 
@@ -731,7 +730,7 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    pub fn release(&mut self, id: i64) -> Result<(), SqlFileSystemError> {
+    pub fn release(&mut self, id: i64) -> Result<(), InnerFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
         let modified = self.storage.close(&mut file)?;
 
@@ -747,7 +746,7 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    pub fn readdir(&mut self, id: i64, offset: i64) -> Result<Vec<DirectoryEntry>, SqlFileSystemError> {
+    pub fn readdir(&mut self, id: i64, offset: i64) -> Result<Vec<DirectoryEntry>, InnerFileSystemError> {
         let entries = self.sql.get_directory_entries_limit(id, 1024, offset)?;
 
         if self.config.update_access_time {
@@ -757,7 +756,7 @@ impl SqlFileSystem {
         Ok(entries)
     }
 
-    pub fn cleanup(&mut self) -> Result<(), SqlFileSystemError> {
+    pub fn cleanup(&mut self) -> Result<(), InnerFileSystemError> {
         let sql = self.sql.clone();
         self.storage
             .cleanup(Rc::new(move |info, test| Self::file_is_in_use(&sql, info, test)))?;
@@ -773,7 +772,7 @@ impl SqlFileSystem {
         Ok(exists)
     }
 
-    pub fn get_file_or_err(&mut self, id: i64) -> Result<FileRow, SqlFileSystemError> {
+    pub fn get_file_or_err(&mut self, id: i64) -> Result<FileRow, InnerFileSystemError> {
         let file = self.sql.get_file(id)?;
 
         if file.is_none() {
@@ -783,7 +782,7 @@ impl SqlFileSystem {
         Ok(file.unwrap())
     }
 
-    pub fn find_directory_entry_or_err(&mut self, id: i64, name: &str) -> Result<DirectoryEntry, SqlFileSystemError> {
+    pub fn find_directory_entry_or_err(&mut self, id: i64, name: &str) -> Result<DirectoryEntry, InnerFileSystemError> {
         let entry = self.sql.find_directory_entry(id, name)?;
 
         if entry.is_none() {
@@ -799,8 +798,8 @@ impl SqlFileSystem {
 
     pub fn transaction<R>(
         &mut self,
-        func: impl FnOnce(&mut Self) -> Result<R, SqlFileSystemError>,
-    ) -> Result<R, SqlFileSystemError> {
+        func: impl FnOnce(&mut Self) -> Result<R, InnerFileSystemError>,
+    ) -> Result<R, InnerFileSystemError> {
         self.sql
             .connection
             .execute("BEGIN TRANSACTION")
@@ -824,23 +823,23 @@ impl SqlFileSystem {
     }
 }
 
-fn error<T>(code: i32, error: AnyError) -> Result<T, SqlFileSystemError> {
-    Err(SqlFileSystemError { code, error })
+fn error<T>(code: i32, error: AnyError) -> Result<T, InnerFileSystemError> {
+    Err(InnerFileSystemError { code, error })
 }
 
-impl From<AnyError> for SqlFileSystemError {
+impl From<AnyError> for InnerFileSystemError {
     fn from(value: AnyError) -> Self {
-        SqlFileSystemError {
+        InnerFileSystemError {
             code: EIO,
             error: value,
         }
     }
 }
 
-impl Display for SqlFileSystemError {
+impl Display for InnerFileSystemError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "SqlFileSystemError: {} {}", self.code, self.error)
     }
 }
 
-impl Error for SqlFileSystemError {}
+impl Error for InnerFileSystemError {}

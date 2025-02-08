@@ -1,6 +1,6 @@
 use crate::config::StorageConfig;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage::ObjInUseFn;
+use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
 use rocksdb::{DBWithThreadMode, Options, SingleThreaded, DB};

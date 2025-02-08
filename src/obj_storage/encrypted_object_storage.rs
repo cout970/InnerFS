@@ -1,6 +1,6 @@
 use crate::config::StorageConfig;
 use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
-use crate::storage::ObjInUseFn;
+use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::generic_array::GenericArray;

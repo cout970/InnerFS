@@ -14,14 +14,14 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
-use crate::sql_fs::SqlFileSystem;
+use crate::inner_file_system::InnerFileSystem;
 use crate::utils::{current_timestamp, system_time_from_timestamp, timestamp_from_system_time};
 
 const BLOCK_SIZE: u32 = 65536; // 64kb
 const FINE_LOGGING: bool = false;
 
 pub struct FuseFileSystem {
-    pub fs: SqlFileSystem,
+    pub fs: InnerFileSystem,
     pub open_files: HashMap<u64, u64>,
     pub fh_counter: u64,
 }
@@ -101,7 +101,7 @@ impl OpenFlags {
 }
 
 impl FuseFileSystem {
-    pub fn new(fs: SqlFileSystem) -> Self {
+    pub fn new(fs: InnerFileSystem) -> Self {
         FuseFileSystem {
             fs,
             open_files: HashMap::new(),

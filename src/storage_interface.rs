@@ -1,13 +1,16 @@
-use crate::fuse_fs::OpenFlags;
+use crate::fuse_file_system::OpenFlags;
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage::{ObjInUseFn, Storage};
+use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::anyhow;
 use libc::{O_APPEND, O_RDONLY};
 use std::cmp::min;
 use std::collections::HashMap;
+use std::rc::Rc;
+
+/// Callback to detects if a file is still in use, allowing correct deletion of de-duplicated files.
+pub type ObjInUseFn = Rc<dyn Fn(&ObjInfo, PathGenerator) -> Result<bool, AnyError>>;
 
 pub struct StorageInterface {
     pub obj_storage: Box<dyn ObjectStorage>,
@@ -32,10 +35,17 @@ impl StorageInterface {
             pending_remove: HashMap::new(),
         }
     }
-}
 
-impl Storage for StorageInterface {
-    fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<bool, AnyError> {
+    pub fn clone(&self) -> StorageInterface {
+        Self {
+            obj_storage: self.obj_storage.clone(),
+            cache: HashMap::new(),
+            pending_remove: HashMap::new(),
+        }
+    }
+
+    /// Opens a file for reading or writing. Returns true if the file was opened successfully.
+    pub fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<bool, AnyError> {
         if (mode as i32) & O_APPEND != 0 {
             return Err(anyhow::anyhow!("Append mode is not supported"));
         }
@@ -79,7 +89,8 @@ impl Storage for StorageInterface {
         Ok(false)
     }
 
-    fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
+    /// Reads data from a file. Returns the number of bytes read.
+    pub fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
         let row = self
             .cache
             .get_mut(&file.id)
@@ -110,7 +121,8 @@ impl Storage for StorageInterface {
         Ok(read_len)
     }
 
-    fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
+    /// Writes data to a file. Returns the number of bytes written.
+    pub fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
         let row = self
             .cache
             .get_mut(&file.id)
@@ -142,7 +154,8 @@ impl Storage for StorageInterface {
         Ok(buff.len())
     }
 
-    fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
+    /// Closes a file. Returns true if the file was modified between open and close.
+    pub fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
         let count = {
             let row = self
                 .cache
@@ -170,7 +183,8 @@ impl Storage for StorageInterface {
         }
     }
 
-    fn flush(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
+    /// Flushes the file to disk. Returns true if the file was modified.
+    pub fn flush(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
         if !self.cache.contains_key(&file.id) {
             return Ok(false);
         }
@@ -210,7 +224,8 @@ impl Storage for StorageInterface {
         Ok(modified)
     }
 
-    fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
+    /// Removes a file from the storage, the operation will be performed when cleanup is called.
+    pub fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
         // TODO allow unlink while the files still exists and auto-remove it once no more open handlers are remaining
         if self.cache.contains_key(&file.id) {
             return Err(anyhow!("File is open, cannot remove"));
@@ -222,7 +237,8 @@ impl Storage for StorageInterface {
         Ok(())
     }
 
-    fn rename(&mut self, file: &FileRow, prev_full_path: &str, new_full_path: &str) -> Result<(), AnyError> {
+    /// Renames a file.
+    pub fn rename(&mut self, file: &FileRow, prev_full_path: &str, new_full_path: &str) -> Result<(), AnyError> {
         if self.cache.contains_key(&file.id) {
             return Err(anyhow!("File is open, cannot rename"));
         }
@@ -239,7 +255,8 @@ impl Storage for StorageInterface {
         Ok(())
     }
 
-    fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
+    /// Performs the remove operation on all files that are pending removal.
+    pub fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
         for (_id, info) in &self.pending_remove {
             self.obj_storage.remove(info, is_in_use.clone())?;
         }
@@ -248,17 +265,10 @@ impl Storage for StorageInterface {
         Ok(())
     }
 
-    fn nuke(&mut self) -> Result<(), AnyError> {
+    /// Removes all files from the storage.
+    pub fn nuke(&mut self) -> Result<(), AnyError> {
         self.cache.clear();
         self.pending_remove.clear();
         self.obj_storage.nuke()
-    }
-
-    fn clone(&self) -> Box<dyn Storage> {
-        Box::new(Self {
-            obj_storage: self.obj_storage.clone(),
-            cache: HashMap::new(),
-            pending_remove: HashMap::new(),
-        })
     }
 }

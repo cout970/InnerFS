@@ -1,6 +1,6 @@
 use crate::config::StorageConfig;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage::ObjInUseFn;
+use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use anyhow::{anyhow, Error};
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};

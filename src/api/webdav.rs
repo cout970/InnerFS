@@ -1,5 +1,5 @@
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY, ROOT_DIRECTORY_ID};
-use crate::sql_fs::SqlFileSystem;
+use crate::inner_file_system::InnerFileSystem;
 use crate::utils::{format_timestamp, humanize_bytes_binary};
 use crate::AnyError;
 use anyhow::Context;
@@ -13,7 +13,7 @@ use url::Url;
 use xml_dom::level2::convert::as_element;
 use xml_dom::level2::{get_implementation, Document, Element, Node, RefNode};
 
-pub fn handle_request(mut request: Request, fs: &mut SqlFileSystem) -> Result<(), AnyError> {
+pub fn handle_request(mut request: Request, fs: &mut InnerFileSystem) -> Result<(), AnyError> {
     let start = Instant::now();
     let method = request.method().as_str();
     info!("IN : {} {}", method, request.url());
@@ -67,14 +67,14 @@ pub fn handle_request(mut request: Request, fs: &mut SqlFileSystem) -> Result<()
 }
 
 /// Provides valid HTTP methods for WebDAV and supported DAV versions
-pub fn handle_options(_request: &mut Request, _fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_options(_request: &mut Request, _fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     Ok(Response::from_string("")
         .with_header_str("Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL")
         .with_header_str("DAV: 1, 2"))
 }
 
 /// Get the content of a file
-pub fn handle_get(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_get(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let file: Option<FileRow> = fs.get_file_by_path(&strip_path(request.url()))?;
 
     if let Some(file) = file {
@@ -99,7 +99,7 @@ pub fn handle_get(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Respo
 }
 
 /// Get the metadata of a file
-pub fn handle_head(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_head(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let file: Option<FileRow> = fs.get_file_by_path(&strip_path(request.url()))?;
 
     if let Some(file) = file {
@@ -122,7 +122,7 @@ pub fn handle_head(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Resp
 }
 
 /// Update the content of a file
-pub fn handle_put(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_put(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let path = strip_path(request.url());
     let mut file = fs.get_file_by_path(&path)?;
 
@@ -148,7 +148,7 @@ pub fn handle_put(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Respo
 }
 
 /// Delete a file or empty folder
-pub fn handle_delete(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_delete(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let path = strip_path(request.url());
     let file = fs.get_file_by_path(&path)?;
 
@@ -168,7 +168,7 @@ pub fn handle_delete(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Re
 }
 
 /// Copy a file to another location
-pub fn handle_copy(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_copy(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let path = strip_path(request.url());
     let parent_path = dirname(&path);
     let filename = basename(&path);
@@ -205,7 +205,7 @@ pub fn handle_copy(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Resp
 }
 
 /// Move a file to another location
-pub fn handle_move(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_move(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let path = strip_path(request.url());
     let parent_path = dirname(&path);
     let filename = basename(&path);
@@ -242,17 +242,17 @@ pub fn handle_move(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Resp
 }
 
 /// Lock a resource, not implemented
-pub fn handle_lock(_request: &mut Request, _fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_lock(_request: &mut Request, _fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     Ok(Response::from_string("Not Implemented").with_status_code(501))
 }
 
 /// Unlock a resource, not implemented
-pub fn handle_unlock(_request: &mut Request, _fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_unlock(_request: &mut Request, _fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     Ok(Response::from_string("Not Implemented").with_status_code(501))
 }
 
 /// Creates a new directory
-pub fn handle_mkcol(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_mkcol(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let path = strip_path(request.url());
     let parent_path = dirname(&path);
     let filename = basename(&path);
@@ -275,7 +275,7 @@ struct FileWithPath {
 }
 
 /// Get properties of a file or directory
-pub fn handle_propfind(request: &mut Request, fs: &mut SqlFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_propfind(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     let depth = request
         .headers()
         .iter()
@@ -299,7 +299,7 @@ pub fn handle_propfind(request: &mut Request, fs: &mut SqlFileSystem) -> Result<
     };
 
     fn get_files(
-        fs: &mut SqlFileSystem,
+        fs: &mut InnerFileSystem,
         file: FileRow,
         path: &str,
         depth: i32,
@@ -351,7 +351,7 @@ pub fn handle_propfind(request: &mut Request, fs: &mut SqlFileSystem) -> Result<
 
 pub fn handle_proppatch(
     _request: &mut Request,
-    _fs: &mut SqlFileSystem,
+    _fs: &mut InnerFileSystem,
 ) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     Ok(Response::from_string("Not Implemented").with_status_code(501))
 }

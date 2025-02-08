@@ -1,7 +1,7 @@
 use crate::config::StorageConfig;
 use crate::metadata_db::MetadataDB;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage::ObjInUseFn;
+use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
 use std::rc::Rc;

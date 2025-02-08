@@ -7,7 +7,7 @@ use crate::obj_storage::rocks_db_object_storage::RocksDbObjectStorage;
 use crate::obj_storage::s3_object_storage::S3ObjectStorage;
 use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
 use crate::obj_storage::versioned_object_storage::VersionedObjectStorage;
-use crate::storage::ObjInUseFn;
+use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
