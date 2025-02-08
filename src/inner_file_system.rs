@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::metadata_db::{DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
 use crate::obj_storage::{ObjInfo, PathGenerator};
+use crate::storage_interface::StorageInterface;
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
@@ -9,7 +10,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::storage_interface::StorageInterface;
 
 pub struct InnerFileSystem {
     pub sql: Rc<MetadataDB>,
@@ -33,24 +33,15 @@ impl InnerFileSystem {
 
         let mut file = self.get_file_or_err(id)?;
         let full_path = self.sql.get_file_path(file.id)?;
-        let modified = self.storage.open(&mut file, &full_path, O_RDONLY as u32)?;
-
-        if modified {
-            self.sql.update_file(&file)?;
-
-            if self.config.store_file_change_history {
-                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
-            }
-        } else if self.config.update_access_time {
-            self.sql.file_set_access_time(file.id, current_timestamp())?;
-        }
+        let fh = self.storage.open(&mut file, &full_path, O_RDONLY as u32)?;
+        self.sql.file_set_access_time(file.id, current_timestamp())?;
 
         let mut complete_buff: Vec<u8> = Vec::with_capacity(file.size as usize);
         let mut buff = vec![0u8; BLOCK_SIZE];
         let mut offset = 0;
 
         loop {
-            let len = self.storage.read(&file, offset as u64, &mut buff)?;
+            let len = self.storage.read(fh, &file, offset as u64, &mut buff)?;
             if len == 0 {
                 break;
             }
@@ -58,7 +49,7 @@ impl InnerFileSystem {
             complete_buff.extend(&buff[..len]);
         }
 
-        let modified = self.storage.close(&mut file)?;
+        let modified = self.storage.close(fh, &mut file)?;
         if modified {
             self.sql.update_file(&file)?;
 
@@ -78,17 +69,9 @@ impl InnerFileSystem {
 
         let mut file = self.get_file_or_err(id)?;
         let full_path = self.sql.get_file_path(file.id)?;
-        let modified = self.storage.open(&mut file, &full_path, O_WRONLY as u32)?;
+        let fh = self.storage.open(&mut file, &full_path, O_WRONLY as u32)?;
 
-        if modified {
-            self.sql.update_file(&file)?;
-
-            if self.config.store_file_change_history {
-                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
-            }
-        } else if self.config.update_access_time {
-            self.sql.file_set_access_time(file.id, current_timestamp())?;
-        }
+        self.sql.file_set_access_time(file.id, current_timestamp())?;
 
         let mut offset = 0;
 
@@ -103,14 +86,14 @@ impl InnerFileSystem {
                 break;
             }
 
-            let len = self.storage.write(&file, offset as u64, section)?;
+            let len = self.storage.write(fh, &file, offset as u64, section)?;
             if len == 0 {
                 break;
             }
             offset += len;
         }
 
-        let modified = self.storage.close(&mut file)?;
+        let modified = self.storage.close(fh, &mut file)?;
         if modified {
             self.sql.update_file(&file)?;
 
@@ -561,8 +544,8 @@ impl InnerFileSystem {
 
         let parent_directory = self.get_file_or_err(parent)?;
         let full_path = self.sql.get_file_path(file.id)?;
-        self.storage.remove(&file, &full_path)?;
-        self.sql.remove_file(dir_entry.entry_file_id)?;
+        self.storage.queue_remove(&file, &full_path)?;
+        self.sql.remove_directory_entry(dir_entry.id)?;
 
         if self.config.store_file_change_history {
             self.sql.register_file_change(&file, FileChangeKind::Deleted)?;
@@ -664,7 +647,7 @@ impl InnerFileSystem {
         })
     }
 
-    pub fn open(&mut self, id: i64, flags: u32) -> Result<(), InnerFileSystemError> {
+    pub fn open(&mut self, id: i64, flags: u32) -> Result<u64, InnerFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
 
         if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0) {
@@ -676,48 +659,39 @@ impl InnerFileSystem {
         }
 
         let full_path = self.sql.get_file_path(file.id)?;
-        let modified = self
+        let fh = self
             .storage
             .open(&mut file, &full_path, flags)
             .context("Error opening file")?;
 
         file.accessed_at = current_timestamp();
+        self.sql.file_set_access_time(file.id, current_timestamp())?;
 
-        if modified {
-            self.sql.update_file(&file)?;
-
-            if self.config.store_file_change_history {
-                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
-            }
-        } else if self.config.update_access_time {
-            self.sql.file_set_access_time(file.id, current_timestamp())?;
-        }
-
-        Ok(())
+        Ok(fh)
     }
 
-    pub fn read(&mut self, id: i64, offset: i64, size: usize) -> Result<Vec<u8>, InnerFileSystemError> {
+    pub fn read(&mut self, fh: u64, id: i64, offset: i64, size: usize) -> Result<Vec<u8>, InnerFileSystemError> {
         let file = self.get_file_or_err(id)?;
 
         let mut buff = vec![0u8; size];
-        let len = self.storage.read(&file, offset as u64, &mut buff)?;
+        let len = self.storage.read(fh, &file, offset as u64, &mut buff)?;
         buff.truncate(len);
         Ok(buff)
     }
 
-    pub fn write(&mut self, id: i64, offset: i64, data: &[u8]) -> Result<usize, InnerFileSystemError> {
+    pub fn write(&mut self, fh: u64, id: i64, offset: i64, data: &[u8]) -> Result<usize, InnerFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
         let file = self.get_file_or_err(id)?;
 
-        let len = self.storage.write(&file, offset as u64, data)?;
+        let len = self.storage.write(fh, &file, offset as u64, data)?;
         Ok(len)
     }
 
-    pub fn flush(&mut self, id: i64) -> Result<(), InnerFileSystemError> {
+    pub fn flush(&mut self, fh: u64, id: i64) -> Result<(), InnerFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
-        let modified = self.storage.flush(&mut file)?;
+        let modified = self.storage.flush(fh, &mut file)?;
 
         if modified {
             self.sql.update_file(&file)?;
@@ -730,9 +704,9 @@ impl InnerFileSystem {
         Ok(())
     }
 
-    pub fn release(&mut self, id: i64) -> Result<(), InnerFileSystemError> {
+    pub fn release(&mut self, fh: u64, id: i64) -> Result<(), InnerFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
-        let modified = self.storage.close(&mut file)?;
+        let modified = self.storage.close(fh, &mut file)?;
 
         if modified {
             self.sql.update_file(&file)?;

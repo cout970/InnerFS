@@ -8,13 +8,12 @@ use libc::{
     O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY,
 };
 use log::{error, trace, warn};
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::inner_file_system::InnerFileSystem;
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::utils::{current_timestamp, system_time_from_timestamp, timestamp_from_system_time};
 
 const BLOCK_SIZE: u32 = 65536; // 64kb
@@ -22,8 +21,6 @@ const FINE_LOGGING: bool = false;
 
 pub struct FuseFileSystem {
     pub fs: InnerFileSystem,
-    pub open_files: HashMap<u64, u64>,
-    pub fh_counter: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,11 +99,7 @@ impl OpenFlags {
 
 impl FuseFileSystem {
     pub fn new(fs: InnerFileSystem) -> Self {
-        FuseFileSystem {
-            fs,
-            open_files: HashMap::new(),
-            fh_counter: 0,
-        }
+        FuseFileSystem { fs }
     }
 
     pub fn get_ttl(&self) -> Duration {
@@ -345,23 +338,14 @@ impl Filesystem for FuseFileSystem {
         let old_name = os_name.to_string_lossy();
         let new_name = new_os_name.to_string_lossy();
 
-        let file = self.fs.lookup(parent as i64, old_name.as_ref()).unwrap();
-        match file {
-            Some(file) => {
-                if self.open_files.values().any(|f| *f == file.id as u64) {
-                    error!(
-                        "Error renaming file {} {:?} to {:?}, file in use ({:?})",
-                        file.id, old_name, new_name, self.open_files
-                    );
-                    reply.error(ENOSYS);
-                    return;
-                }
-            }
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        }
+        let Some(_) = self
+            .fs
+            .lookup(parent as i64, old_name.as_ref())
+            .expect("Unable to find file by name")
+        else {
+            reply.error(ENOENT);
+            return;
+        };
 
         // Not allowed to move across directories
         if parent != new_parent_id {
@@ -421,10 +405,7 @@ impl Filesystem for FuseFileSystem {
         let flags = open_flags.to_safe_flags() as u32;
 
         match self.fs.open(ino as i64, flags) {
-            Ok(_) => {
-                self.fh_counter += 1;
-                let fh = self.fh_counter;
-                self.open_files.insert(fh, ino);
+            Ok(fh) => {
                 reply.opened(fh, flags);
             }
             Err(e) => {
@@ -438,7 +419,7 @@ impl Filesystem for FuseFileSystem {
 
     fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyRead) {
         trace!("FS read(ino: {}, file_handle: {}, offset: {}, size: {})", ino, fh, offset, size);
-        match self.fs.read(ino as i64, offset, size as usize) {
+        match self.fs.read(fh, ino as i64, offset, size as usize) {
             Ok(data) => {
                 reply.data(&data);
             }
@@ -458,7 +439,7 @@ impl Filesystem for FuseFileSystem {
             data.len(),
             flags
         );
-        match self.fs.write(ino as i64, offset, data) {
+        match self.fs.write(fh, ino as i64, offset, data) {
             Ok(size) => {
                 reply.written(size as u32);
             }
@@ -471,9 +452,9 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
-        trace!("FS flush(ino: {}, file_handle: {})", ino, _fh);
-        match self.fs.flush(ino as i64) {
+    fn flush(&mut self, _req: &Request, ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        trace!("FS flush(ino: {}, file_handle: {})", ino, fh);
+        match self.fs.flush(fh, ino as i64) {
             Ok(_) => {
                 reply.ok();
             }
@@ -497,9 +478,8 @@ impl Filesystem for FuseFileSystem {
         reply: ReplyEmpty,
     ) {
         trace!("FS release(ino: {}, file_handle: {}, flags: {})", ino, fh, _flags);
-        match self.fs.release(ino as i64) {
+        match self.fs.release(fh, ino as i64) {
             Ok(_) => {
-                self.open_files.remove(&fh);
                 reply.ok();
             }
             Err(e) => {
@@ -645,11 +625,7 @@ impl Filesystem for FuseFileSystem {
         };
 
         match self.fs.open(file.id, flags) {
-            Ok(_) => {
-                self.fh_counter += 1;
-                let fh = self.fh_counter;
-                self.open_files.insert(fh, file.id as u64);
-
+            Ok(fh) => {
                 let attr = FileAttr::from(&file);
                 reply.created(&self.get_ttl(), &attr, 0, fh, flags);
             }

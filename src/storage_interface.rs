@@ -1,4 +1,3 @@
-use crate::fuse_file_system::OpenFlags;
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
 use crate::utils::current_timestamp;
@@ -14,140 +13,132 @@ pub type ObjInUseFn = Rc<dyn Fn(&ObjInfo, PathGenerator) -> Result<bool, AnyErro
 
 pub struct StorageInterface {
     pub obj_storage: Box<dyn ObjectStorage>,
-    pub cache: HashMap<i64, StorageInterfaceCache>,
-    pub pending_remove: HashMap<i64, ObjInfo>,
+    pub open_files: HashMap<u64, OpenFile>,
+    pub unlinked_files: HashMap<i64, ObjInfo>,
+    pub file_page_cache: HashMap<i64, Vec<u8>>,
+    pub fh_counter: u64,
 }
 
-pub struct StorageInterfaceCache {
+pub struct OpenFile {
+    pub fh: u64,
+    pub ino: i64,
     pub full_path: String,
     pub mode: i32,
-    pub content: Vec<u8>,
-    pub retrieved: bool,
     pub modified: bool,
-    pub count: i32,
 }
 
 impl StorageInterface {
     pub fn new(obj_storage: Box<dyn ObjectStorage>) -> Self {
         Self {
             obj_storage,
-            cache: HashMap::new(),
-            pending_remove: HashMap::new(),
+            open_files: HashMap::new(),
+            unlinked_files: HashMap::new(),
+            file_page_cache: HashMap::new(),
+            fh_counter: 0,
         }
     }
 
     pub fn clone(&self) -> StorageInterface {
         Self {
             obj_storage: self.obj_storage.clone(),
-            cache: HashMap::new(),
-            pending_remove: HashMap::new(),
+            open_files: HashMap::new(),
+            unlinked_files: HashMap::new(),
+            file_page_cache: HashMap::new(),
+            fh_counter: 0,
         }
     }
 
+    pub fn is_file_open(&self, id: i64) -> bool {
+        self.open_files.contains_key(&(id as u64))
+    }
+
+    pub fn get_open_files_by_ino(&self, ino: i64) -> Vec<u64> {
+        self.open_files
+            .values()
+            .filter(|f| f.ino == ino)
+            .map(|f| f.fh)
+            .collect()
+    }
+
     /// Opens a file for reading or writing. Returns true if the file was opened successfully.
-    pub fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<bool, AnyError> {
+    pub fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<u64, AnyError> {
         if (mode as i32) & O_APPEND != 0 {
             return Err(anyhow::anyhow!("Append mode is not supported"));
         }
 
-        // Allow multiple read-only opens
-        {
-            let prev = self.cache.get_mut(&file.id);
+        self.fh_counter += 1;
+        let fh = self.fh_counter;
 
-            if let Some(cache) = prev {
-                let prev_flags = OpenFlags::from(cache.mode);
-                let new_flags = OpenFlags::from(mode as i32);
-                // Only allowed to open in read mode if it was previously opened in read mode
-                let valid =
-                    prev_flags.read_only && new_flags.read_only && !prev_flags.exclusive && !new_flags.exclusive;
-
-                if !valid {
-                    return Err(anyhow!(
-                        "File {} is already open in write mode:\n  prev={:?},\n  new={:?}",
-                        file.id,
-                        prev_flags,
-                        new_flags
-                    ));
-                }
-
-                cache.count += 1;
-            }
-        }
-
-        self.cache.insert(
-            file.id,
-            StorageInterfaceCache {
+        self.open_files.insert(
+            fh,
+            OpenFile {
+                fh,
+                ino: file.id,
                 full_path: full_path.to_string(),
                 mode: mode as i32,
-                content: vec![],
-                retrieved: false,
                 modified: false,
-                count: 1,
             },
         );
 
-        Ok(false)
+        Ok(fh)
     }
 
     /// Reads data from a file. Returns the number of bytes read.
-    pub fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
+    pub fn read(&mut self, fh: u64, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
         let row = self
-            .cache
-            .get_mut(&file.id)
-            .ok_or_else(|| anyhow!("Trying to use a file that was closed or never opened: {}", file.id))?;
+            .open_files
+            .get_mut(&fh)
+            .ok_or_else(|| anyhow!("Trying to use a file that is not open, fd: {}, ino: {}", fh, file.id))?;
 
         if row.mode & libc::O_WRONLY != 0 {
             return Err(anyhow::anyhow!("File is write-only ({})", file.name));
         }
 
-        if !row.retrieved {
+        if !self.file_page_cache.contains_key(&file.id) {
             let content = if !file.sha512.is_empty() {
                 let info = ObjInfo::new(file, &row.full_path);
                 self.obj_storage.get(&info)?
             } else {
                 vec![]
             };
-            row.content = content;
-            row.retrieved = true;
+            self.file_page_cache.insert(file.id, content);
         }
 
-        if offset >= row.content.len() as u64 {
+        let cache = self.file_page_cache.get(&file.id).unwrap();
+
+        if offset >= cache.len() as u64 {
             return Ok(0);
         }
 
-        let remaining_content_slice = &row.content[offset as usize..];
+        let remaining_content_slice = &cache[offset as usize..];
         let read_len = min(buff.len(), remaining_content_slice.len());
         buff[..read_len].copy_from_slice(&remaining_content_slice[..read_len]);
         Ok(read_len)
     }
 
     /// Writes data to a file. Returns the number of bytes written.
-    pub fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
+    pub fn write(&mut self, fh: u64, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
         let row = self
-            .cache
-            .get_mut(&file.id)
-            .ok_or_else(|| anyhow!("Trying to use a file that was closed or never opened: {}", file.id))?;
+            .open_files
+            .get_mut(&fh)
+            .ok_or_else(|| anyhow!("Trying to use a file that is not open, fd: {}, ino: {}", fh, file.id))?;
 
         if row.mode & O_RDONLY != 0 {
             return Err(anyhow::anyhow!("File is read-only"));
         }
 
-        if row.retrieved {
-            row.content.clear();
-            row.retrieved = false;
-        }
-
         let offset = offset as usize;
+        let cache = self.file_page_cache.entry(file.id).or_insert_with(|| Vec::with_capacity(1024 * 16));
 
         if offset == buff.len() {
             // Append to the end
-            row.content.extend(buff.iter());
+            cache.extend(buff.iter());
         } else {
             // Overwrite
-            if offset + buff.len() > row.content.len() {
-                row.content.resize(offset + buff.len(), 0);
+            if offset + buff.len() > cache.len() {
+                cache.resize(offset + buff.len(), 0);
             }
-            row.content[offset..offset + buff.len()].copy_from_slice(buff);
+            cache[offset..offset + buff.len()].copy_from_slice(buff);
         }
 
         row.modified = true;
@@ -155,46 +146,42 @@ impl StorageInterface {
     }
 
     /// Closes a file. Returns true if the file was modified between open and close.
-    pub fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
-        let count = {
-            let row = self
-                .cache
-                .get_mut(&file.id)
-                .ok_or_else(|| anyhow!("Trying to use a file that was closed or never opened: {}", file.id))?;
+    pub fn close(&mut self, fh: u64, file: &mut FileRow) -> Result<bool, AnyError> {
+        if !self.open_files.contains_key(&fh) {
+            return Err(anyhow!("Trying to close a file that is not open, fd: {}, ino: {}", fh, file.id));
+        }
 
-            row.count -= 1;
-            row.count
-        };
-
-        match self.flush(file) {
+        match self.flush(fh, file) {
             Ok(modified) => {
-                if count <= 0 {
-                    self.cache.remove(&file.id);
+                self.open_files.remove(&fh);
+                if !self.is_file_open(file.id) {
+                    self.file_page_cache.remove(&file.id);
                 }
                 Ok(modified)
             }
             Err(e) => {
                 // Clean up file even if there was an error
-                if count <= 0 {
-                    self.cache.remove(&file.id);
-                }
+                self.open_files.remove(&fh);
                 Err(e)
             }
         }
     }
 
     /// Flushes the file to disk. Returns true if the file was modified.
-    pub fn flush(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
-        if !self.cache.contains_key(&file.id) {
-            return Ok(false);
+    pub fn flush(&mut self, fh: u64, file: &mut FileRow) -> Result<bool, AnyError> {
+        if !self.open_files.contains_key(&fh) {
+            return Err(anyhow!("Trying to close a file that is not open, fd: {}, ino: {}", fh, file.id));
         }
 
         let mut modified = false;
-        let row = self.cache.get_mut(&file.id).unwrap();
+        let row = self.open_files.get_mut(&fh).unwrap();
 
         if row.modified {
+            let empty: Vec<u8> = vec![];
+            let cache = self.file_page_cache.get(&file.id).unwrap_or(&empty);
+
             // Shas of contents as id for the object
-            let sha512 = hex::encode(hmac_sha512::Hash::hash(&row.content));
+            let sha512 = hex::encode(hmac_sha512::Hash::hash(&cache));
 
             // This operation was disabled on purpose
             // When the storage backend uses a sha512 as the object id, new write will create a new object
@@ -209,15 +196,15 @@ impl StorageInterface {
 
             file.sha512 = sha512;
             let mut info = ObjInfo::new(file, &row.full_path);
-            info.size = row.content.len() as u64;
+            info.size = cache.len() as u64;
 
             // Store new object
-            self.obj_storage.put(&mut info, &row.content)?;
+            self.obj_storage.put(&mut info, &cache)?;
 
             // Update file metadata
             file.encryption_key = info.encryption_key;
             file.compression = info.compression;
-            file.size = row.content.len() as i64;
+            file.size = cache.len() as i64;
             file.updated_at = current_timestamp();
             modified = true;
         }
@@ -225,21 +212,15 @@ impl StorageInterface {
     }
 
     /// Removes a file from the storage, the operation will be performed when cleanup is called.
-    pub fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
-        // TODO allow unlink while the files still exists and auto-remove it once no more open handlers are remaining
-        if self.cache.contains_key(&file.id) {
-            return Err(anyhow!("File is open, cannot remove"));
-        }
-
-        if !file.sha512.is_empty() {
-            self.pending_remove.insert(file.id, ObjInfo::new(file, full_path));
-        }
+    pub fn queue_remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
+        self.unlinked_files.insert(file.id, ObjInfo::new(file, full_path));
         Ok(())
     }
 
     /// Renames a file.
     pub fn rename(&mut self, file: &FileRow, prev_full_path: &str, new_full_path: &str) -> Result<(), AnyError> {
-        if self.cache.contains_key(&file.id) {
+        // TODO check if rename is supported while a file is being written
+        if !self.get_open_files_by_ino(file.id).is_empty() {
             return Err(anyhow!("File is open, cannot rename"));
         }
 
@@ -257,18 +238,25 @@ impl StorageInterface {
 
     /// Performs the remove operation on all files that are pending removal.
     pub fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        for (_id, info) in &self.pending_remove {
-            self.obj_storage.remove(info, is_in_use.clone())?;
+        let mut removed = vec![];
+
+        for (id, info) in &self.unlinked_files {
+            if self.get_open_files_by_ino(*id).is_empty() {
+                self.obj_storage.remove(info, is_in_use.clone())?;
+                removed.push(*id);
+            }
         }
 
-        self.pending_remove.clear();
+        for i in removed {
+            self.unlinked_files.remove(&i);
+        }
         Ok(())
     }
 
     /// Removes all files from the storage.
     pub fn nuke(&mut self) -> Result<(), AnyError> {
-        self.cache.clear();
-        self.pending_remove.clear();
+        self.open_files.clear();
+        self.unlinked_files.clear();
         self.obj_storage.nuke()
     }
 }

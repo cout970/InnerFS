@@ -1302,6 +1302,7 @@ impl FileRow {
         hash.update(&self.id.to_string());
         hash.update(&self.kind.to_string());
         hash.update(&self.name);
+        hash.update(&self.external_id.to_string());
         hash.update(&self.uid.to_string());
         hash.update(&self.gid.to_string());
         hash.update(&self.perms.to_string());
@@ -1312,6 +1313,14 @@ impl FileRow {
         hash.update(&self.created_at.to_string());
         hash.update(&self.updated_at.to_string());
         hex::encode(hash.finalize())
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.kind == FILE_KIND_DIRECTORY
+    }
+
+    pub fn is_regular(&self) -> bool {
+        self.kind == FILE_KIND_REGULAR
     }
 }
 
