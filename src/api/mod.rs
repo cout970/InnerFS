@@ -10,15 +10,19 @@ use webdav::*;
 mod webdav;
 
 pub fn start_webdav_server(fs: InnerFileSystem, addr: Option<String>) -> Result<(), AnyError> {
-    let address = addr.as_ref().map(|i| i.as_str()).unwrap_or("127.0.0.1:8080");
+    let webdav_conf = fs.config.webdav.clone();
+    let address = addr
+        .as_ref()
+        .map(|i| i.clone())
+        .unwrap_or_else(|| format!("{}:{}", webdav_conf.address, webdav_conf.port));
 
-    let server = Arc::new(Server::http(address).map_err(|e| anyhow!("Unable to start server: {}", e))?);
+    let server = Arc::new(Server::http(&address).map_err(|e| anyhow!("Unable to start server at {}: {}", address, e))?);
     let mut guards = Vec::with_capacity(4);
     info!("Server started on http://{}", address);
 
     let config = fs.config.clone();
 
-    for _ in 0..4 {
+    for _ in 0..webdav_conf.threads.max(1) {
         let server = server.clone();
         let config_copy = config.clone();
 

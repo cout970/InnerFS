@@ -1,8 +1,9 @@
-use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY, ROOT_DIRECTORY_ID};
 use crate::inner_file_system::InnerFileSystem;
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY, ROOT_DIRECTORY_ID};
 use crate::utils::{format_timestamp, humanize_bytes_binary};
 use crate::AnyError;
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+use aws_smithy_types::base64;
 use log::{error, info};
 use std::io::{BufReader, Cursor, Read};
 use std::path::PathBuf;
@@ -17,6 +18,37 @@ pub fn handle_request(mut request: Request, fs: &mut InnerFileSystem) -> Result<
     let start = Instant::now();
     let method = request.method().as_str();
     info!("IN : {} {}", method, request.url());
+    let mut has_auth = false;
+
+    let auth = request.headers().iter().find(|h| h.field.equiv("Authorization"));
+    let auth = auth.map(|h| h.value.as_str()).unwrap_or("");
+    if !auth.is_empty() && auth.starts_with("Basic ") {
+        let token =
+            String::from_utf8(base64::decode(&auth[6..]).map_err(|_| anyhow!("Invalid Authorization header"))?)?;
+        let (username, pass) = token
+            .split_once(":")
+            .ok_or_else(|| anyhow!("Invalid Authorization header"))?;
+
+        if username == fs.config.webdav.username && pass == fs.config.webdav.password {
+            has_auth = true;
+        }
+    }
+
+    if fs.config.webdav.enable_auth && !has_auth {
+        let response = Response::from_string("Unauthorized")
+            .with_status_code(401)
+            .with_header_str("WWW-Authenticate: Basic realm=\"WebDAV\", charset=\"UTF-8\"");
+        let elapsed = start.elapsed().as_millis();
+        info!(
+            "OUT: {} ({}, {} ms)",
+            response.status_code().0,
+            humanize_bytes_binary(response.data_length().unwrap_or(0)),
+            elapsed
+        );
+
+        request.respond(response)?;
+        return Ok(());
+    }
 
     if method == "GET" && request.url() == "/" {
         let home = Response::from_string(include_str!("./web/dist/index.html"))
@@ -60,14 +92,19 @@ pub fn handle_request(mut request: Request, fs: &mut InnerFileSystem) -> Result<
         .with_header_str(
             "Access-Control-Allow-Methods: OPTIONS, GET, HEAD, POST, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL",
         )
-        .with_header_str("Access-Control-Allow-Headers: Content-Type, Depth, Destination, Overwrite, Authorization");
+        .with_header_str(
+            "Access-Control-Allow-Headers: Content-Type, Depth, Destination, Overwrite, Authorization, Range",
+        );
 
     request.respond(response)?;
     Ok(())
 }
 
 /// Provides valid HTTP methods for WebDAV and supported DAV versions
-pub fn handle_options(_request: &mut Request, _fs: &mut InnerFileSystem) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
+pub fn handle_options(
+    _request: &mut Request,
+    _fs: &mut InnerFileSystem,
+) -> Result<Response<Cursor<Vec<u8>>>, AnyError> {
     Ok(Response::from_string("")
         .with_header_str("Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL")
         .with_header_str("DAV: 1, 2"))
@@ -78,15 +115,51 @@ pub fn handle_get(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Res
     let file: Option<FileRow> = fs.get_file_by_path(&strip_path(request.url()))?;
 
     if let Some(file) = file {
-        let content = fs.read_all(file.id)?;
+        let mut start = 0;
+        let mut end = file.size as u64;
+
+        if let Some(pair) = parse_range_header(&request, file.size) {
+            start = pair.0;
+            end = pair.1;
+
+            if start >= file.size as u64 {
+                return Ok(Response::from_string("Requested Range Not Satisfiable").with_status_code(416));
+            }
+
+            // Max 100 MB per request
+            if end - start >= 100 * 1024 * 1024 {
+                end = start + 100 * 1024 * 1024;
+            }
+        }
+
+        let content = if start != 0 || end != file.size as u64 {
+            fs.read_range(file.id, start, end)?
+        } else {
+            fs.read_all(file.id)?
+        };
+
+        let len = content.len();
         let mut response = Response::from_data(content);
-        let headers = [
-            Header::from_str("Content-Type: application/octet-stream").unwrap(),
+
+        let mime = mime_guess::from_path(&file.name)
+            .first()
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_owned());
+
+        let mut headers = vec![
             Header::from_str("Content-Disposition: inline").unwrap(),
-            Header::from_str(&format!("Content-Length: {}", file.size)).unwrap(),
-            Header::from_str(&format!("ETag: \"{}\"", file.sha512)).unwrap(),
+            Header::from_str("Accept-Ranges: bytes").unwrap(),
+            Header::from_str(&format!("Content-Type: {}", mime)).unwrap(),
+            Header::from_str(&format!("Content-Length: {}", len)).unwrap(),
             Header::from_str(&format!("Last-Modified: {}", format_timestamp(file.updated_at))).unwrap(),
         ];
+
+        if start != 0 || end != file.size as u64 {
+            response = response.with_status_code(206);
+            headers.push(Header::from_str(&format!("Content-Range: bytes {}-{}/{}", start, end, file.size)).unwrap());
+        } else {
+            headers.push(Header::from_str(&format!("ETag: \"{}\"", file.sha512)).unwrap());
+        }
 
         for h in headers {
             response.add_header(h);
@@ -96,6 +169,20 @@ pub fn handle_get(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Res
     } else {
         Ok(Response::from_string("Not Found").with_status_code(404))
     }
+}
+
+fn parse_range_header(request: &Request, available_size: i64) -> Option<(u64, u64)> {
+    let range = request.headers().iter().find(|h| h.field.equiv("Range"));
+    let range = range.map(|h| h.value.to_string())?;
+
+    let range = range.trim_start_matches("bytes=").split('-').collect::<Vec<&str>>();
+    let start = range[0].parse::<u64>().unwrap_or(0);
+    let end = range
+        .get(1)
+        .map(|i| i.parse::<u64>().unwrap_or(available_size as u64))
+        .unwrap_or(available_size as u64);
+
+    Some((start, end))
 }
 
 /// Get the metadata of a file
@@ -109,6 +196,7 @@ pub fn handle_head(request: &mut Request, fs: &mut InnerFileSystem) -> Result<Re
             Header::from_str(&format!("Content-Length: {}", file.size)).unwrap(),
             Header::from_str(&format!("ETag: \"{}\"", file.sha512)).unwrap(),
             Header::from_str(&format!("Last-Modified: {}", format_timestamp(file.updated_at))).unwrap(),
+            Header::from_str("Accept-Ranges: bytes").unwrap(),
         ];
 
         for h in headers {
@@ -305,11 +393,13 @@ pub fn handle_propfind(request: &mut Request, fs: &mut InnerFileSystem) -> Resul
         depth: i32,
         files: &mut Vec<FileWithPath>,
     ) -> Result<(), AnyError> {
-        files.push(FileWithPath {
-            path: path.to_owned(),
-            local_name: file.name.clone(),
-            file: file.clone(),
-        });
+        if file.id != ROOT_DIRECTORY_ID {
+            files.push(FileWithPath {
+                path: path.to_owned(),
+                local_name: file.name.clone(),
+                file: file.clone(),
+            });
+        }
 
         if file.kind == FILE_KIND_DIRECTORY && depth > 0 {
             for entry in fs.get_directory_entries(file.id)? {
@@ -445,7 +535,8 @@ fn generate_propfind_response(files: &[FileWithPath], requested_properties: Vec<
             add_property(&doc, &mut prop, "D:creationdate", &format_timestamp(file.created_at))?;
         }
         if requested_properties.contains(&"quota-available-bytes".to_owned()) {
-            add_property(&doc, &mut prop, "D:quota-available-bytes", "1000000000")?;
+            // 1 TB
+            add_property(&doc, &mut prop, "D:quota-available-bytes", "1099511627776")?;
         }
         if requested_properties.contains(&"quota-used-bytes".to_owned()) {
             add_property(&doc, &mut prop, "D:quota-used-bytes", "0")?;

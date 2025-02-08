@@ -64,6 +64,46 @@ impl InnerFileSystem {
         Ok(complete_buff)
     }
 
+    pub fn read_range(&mut self, id: i64, start: u64, end: u64) -> Result<Vec<u8>, InnerFileSystemError> {
+        const BLOCK_SIZE: usize = 65536; // 64kb
+
+        let mut file = self.get_file_or_err(id)?;
+        let full_path = self.sql.get_file_path(file.id)?;
+        let fh = self.storage.open(&mut file, &full_path, O_RDONLY as u32)?;
+        self.sql.file_set_access_time(file.id, current_timestamp())?;
+
+        let mut complete_buff: Vec<u8> = Vec::with_capacity(file.size as usize);
+        let mut buff = vec![0u8; BLOCK_SIZE];
+        let mut offset = 0;
+
+        loop {
+            let len = self.storage.read(fh, &file, offset as u64, &mut buff)?;
+            if len == 0 {
+                break;
+            }
+            offset += len;
+            complete_buff.extend(&buff[..len]);
+
+            if offset >= end as usize {
+                break;
+            }
+        }
+
+        let modified = self.storage.close(fh, &mut file)?;
+        if modified {
+            self.sql.update_file(&file)?;
+
+            if self.config.store_file_change_history {
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
+            }
+        } else if self.config.update_access_time {
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
+        }
+
+        self.cleanup()?;
+        Ok(complete_buff[(start as usize)..complete_buff.len().min(end as usize)].to_vec())
+    }
+
     pub fn write_all(&mut self, id: i64, contents: &[u8]) -> Result<(), InnerFileSystemError> {
         const BLOCK_SIZE: usize = 65536; // 64kb
 

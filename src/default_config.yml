@@ -33,9 +33,16 @@ primary:
   s3_access_key: '********************'
   # S3 secret key
   s3_secret_key: '****************************************'
-  # If set, all blobs will be encrypted using AES-256-GCM, the key will unique for each blob
-  # and derived from this value using PBKDF2-HMAC-SHA256 and salt
+  # If set, all blobs will be encrypted using AES-256-GCM. Each blob will have a unique encryption key,
+  # derived from this value using PBKDF2-HMAC with a salt.
+  #
+  # The value can be:
+  # - A string containing the encryption key in plain text.
+  # - An object with a "path" field, specifying a file that contains the encryption key.
+  # - An object with an "ask" field set to true, prompting the user to enter the key interactively when the filesystem is mounted.
+  # - An object with an "env" field set to the name of an environment variable that contains the key.
   encryption_key: ''
+
   # Gzip compression, values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
   # Automatically disabled if [encryption_key] is set, not recommended for backends that already compress data, like RocksBD or S3
   compression_level: 0
@@ -63,6 +70,27 @@ store_file_change_history: true
 
 # If set to true, any operation that would modify the database or the blobs will be rejected
 readonly: false
+
+# Options for the WebDAV server command
+webdav:
+  # Server address, set to 0.0.0.0 to listen on all interfaces and allow remote connections
+  address: 127.0.0.1
+  # Server port
+  port: 8080
+  # Number of threads to handle requests
+  threads: 4
+  # Require authentication, if false, the username and password will be ignored
+  enable_auth: false
+  # Username for authentication
+  username: admin
+  # Password for authentication
+  #
+  # The value can be:
+  # - A string containing the encryption key in plain text.
+  # - An object with a "path" field, specifying a file that contains the encryption key.
+  # - An object with an "ask" field set to true, prompting the user to enter the key interactively when the filesystem is mounted.
+  # - An object with an "env" field set to the name of an environment variable that contains the key.
+  password: ''
 
 ### Default values for undefined fields in primary/replicas
 blob_storage: ./blob

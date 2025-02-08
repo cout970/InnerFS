@@ -18,4 +18,8 @@ Depth: 1
     <D:propall/>
 </D:propfind>
 
-###
+### Get with range
+GET http://localhost:8080/example.txt
+Content-Type: application/xml
+Range: bytes=0-10
+Authorization: Basic YWRtaW46YWRtaW4=

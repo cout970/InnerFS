@@ -33,6 +33,7 @@ struct YamlConfig {
     encryption_key: Option<YamlEncryptionKeyConfig>,
     compression_level: Option<u32>,
     use_versioning: Option<bool>,
+    webdav: Option<YamlWebdavConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -58,7 +59,18 @@ pub struct YamlStorageConfig {
 pub enum YamlEncryptionKeyConfig {
     Plain(String),
     External { path: String },
+    Env { env: String },
     Ask { ask: bool },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct YamlWebdavConfig {
+    pub address: Option<String>,
+    pub port: Option<u16>,
+    pub threads: Option<u16>,
+    pub enable_auth: Option<bool>,
+    pub username: Option<String>,
+    pub password: Option<YamlEncryptionKeyConfig>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -78,6 +90,7 @@ pub struct Config {
     pub update_access_time: bool,
     pub store_file_change_history: bool,
     pub readonly: bool,
+    pub webdav: WebdavConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +108,16 @@ pub struct StorageConfig {
     pub compression_level: u32,
     pub use_versioning: bool,
     pub path_generator: PathGenerator,
+}
+
+#[derive(Debug, Clone)]
+pub struct WebdavConfig {
+    pub address: String,
+    pub port: u16,
+    pub threads: u16,
+    pub enable_auth: bool,
+    pub username: String,
+    pub password: String,
 }
 
 /// Read and parse the main config file
@@ -183,6 +206,21 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
         path_generator: path_generation,
     });
 
+    let yaml_webdav = config.webdav.clone().unwrap_or_default();
+
+    let webdav = WebdavConfig {
+        address: yaml_webdav.address.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
+        port: yaml_webdav.port.unwrap_or(8080),
+        threads: yaml_webdav.threads.unwrap_or(4),
+        enable_auth: yaml_webdav.enable_auth.unwrap_or(false),
+        username: yaml_webdav.username.clone().unwrap_or_else(|| "".to_string()),
+        password: yaml_webdav
+            .password
+            .clone()
+            .map(|value| extract_encryption_key(value))
+            .unwrap_or_else(|| "".to_string()),
+    };
+
     let mut cfg = Config {
         database_file: config.database_file.unwrap_or("./index.db".to_string()),
         mount_point: config.mount_point.unwrap_or("./data".to_string()),
@@ -191,6 +229,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
         update_access_time: config.update_access_time.unwrap_or(false),
         store_file_change_history: config.store_file_change_history.unwrap_or(true),
         readonly: config.readonly.unwrap_or(false),
+        webdav,
     };
 
     let replicas = config.replicas.clone().unwrap_or_default();
@@ -282,6 +321,7 @@ fn extract_encryption_key(value: YamlEncryptionKeyConfig) -> String {
             let contents = fs::read_to_string(&path).expect("Unable to read encryption key file");
             contents.trim().to_string()
         }
+        YamlEncryptionKeyConfig::Env { env } => env::var(&env).expect("Unable to read encryption key from environment"),
         YamlEncryptionKeyConfig::Ask { ask } => {
             if !ask {
                 panic!("Invalid encryption key configuration, set 'ask: true' to ask for the key at startup");
