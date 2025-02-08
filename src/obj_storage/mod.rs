@@ -121,7 +121,7 @@ pub fn create_object_storage(config: Arc<StorageConfig>, sql: Rc<MetadataDB>) ->
         obj_storage = Box::new(EncryptedObjectStorage::new(config.clone(), obj_storage));
     } else if config.compression_level > 0 {
         // Apply compression if a level is provided
-        obj_storage = Box::new(CompressedObjectStorage::new(obj_storage, config.compression_level));
+        obj_storage = Box::new(CompressedObjectStorage::new(config.clone(), obj_storage));
     }
 
     if config.use_versioning {
