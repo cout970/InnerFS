@@ -160,7 +160,7 @@ impl EncryptedObjectStorage {
         Ok(plaintext)
     }
 
-    fn path(&self, _key: &FileKey, original_path: &str, external_id: &str) -> String {
+    fn path(&self, original_path: &str, external_id: &str) -> String {
         match self.config.path_generator {
             PathGenerator::Path => original_path.to_string(),
             PathGenerator::Sha512 => {
@@ -230,7 +230,7 @@ impl ObjectStorage for EncryptedObjectStorage {
 
         fn try_key(this: &mut EncryptedObjectStorage, info: &ObjInfo, key: FileKey) -> Result<Vec<u8>, Error> {
             let mut info = info.clone();
-            info.full_path = this.path(&key, &info.full_path, &info.external_id);
+            info.full_path = this.path(&info.full_path, &info.external_id);
 
             let bytes = this.fs.get(&info)?;
             // Skip the first line, which contains a header with metadata
@@ -260,7 +260,7 @@ impl ObjectStorage for EncryptedObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
         let (key, bytes) = Self::encrypt(&self.config.encryption_key, &content, &info.sha512)?;
-        let full_path = self.path(&key, &info.full_path, &info.external_id);
+        let full_path = self.path(&info.full_path, &info.external_id);
         let prev_path = info.full_path.clone();
 
         // Hide real path, to avoid leaking information (only has effect if config.path_generator is Path)
@@ -285,72 +285,30 @@ impl ObjectStorage for EncryptedObjectStorage {
     }
 
     fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), Error> {
-        let keys = Self::get_keys_from_keychain(&info.encryption_key, &self.config.name)?;
+        let original_info = info.clone();
+        let mut info_copy = info.clone();
+        info_copy.full_path = self.path(&info_copy.full_path, &info_copy.external_id);
 
-        fn try_key(
-            this: &mut EncryptedObjectStorage,
-            info: &ObjInfo,
-            key: FileKey,
-            is_in_use: ObjInUseFn,
-        ) -> Result<(), Error> {
-            let original_info = info.clone();
-            let mut info_copy = info.clone();
-            info_copy.full_path = this.path(&key, &info_copy.full_path, &info_copy.external_id);
+        self.fs
+            .remove(&info_copy, Rc::new(move |_, pg| is_in_use(&original_info, pg)))?;
 
-            this.fs
-                .remove(&info_copy, Rc::new(move |_, pg| is_in_use(&original_info, pg)))
-        }
-
-        let mut last_error = None;
-
-        for key in keys {
-            match try_key(self, info, key, is_in_use.clone()) {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow!("No valid key found")))
+        Ok(())
     }
 
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let keys = Self::get_keys_from_keychain(&prev_info.encryption_key, &self.config.name)?;
+        let prev_path = self.path(&prev_info.full_path, &prev_info.external_id);
+        let new_path = self.path(&new_info.full_path, &new_info.external_id);
 
-        fn try_key(
-            this: &mut EncryptedObjectStorage,
-            prev_info: &ObjInfo,
-            new_info: &ObjInfo,
-            key: FileKey,
-        ) -> Result<(), AnyError> {
-            let prev_path = this.path(&key, &prev_info.full_path, &prev_info.external_id);
-            let new_path = this.path(&key, &new_info.full_path, &new_info.external_id);
+        if prev_path != new_path {
+            let mut prev_info = prev_info.clone();
+            let mut new_info = new_info.clone();
 
-            if prev_path != new_path {
-                let mut prev_info = prev_info.clone();
-                let mut new_info = new_info.clone();
+            prev_info.full_path = prev_path;
+            new_info.full_path = new_path;
 
-                prev_info.full_path = prev_path;
-                new_info.full_path = new_path;
-
-                this.fs.rename(&prev_info, &new_info)?;
-            }
-            Ok(())
+            self.fs.rename(&prev_info, &new_info)?;
         }
-
-        let mut last_error = None;
-
-        for key in keys {
-            match try_key(self, prev_info, new_info, key) {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow!("No valid key found")))
+        Ok(())
     }
 
     fn nuke(&mut self) -> Result<(), Error> {
