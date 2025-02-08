@@ -1,10 +1,17 @@
+use cntr_fuse::{
+    fuse_forget_one, FileAttr, FileType, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen, ReplyRead, ReplyStatfs,
+    ReplyWrite, Request, UtimeSpec,
+};
+use libc::{
+    c_int, ENOENT, ENOSYS, EROFS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH,
+    O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY,
+};
+use log::{error, trace, warn};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-use cntr_fuse::{fuse_forget_one, FileAttr, FileType, Filesystem, ReplyAttr, ReplyBmap, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLock, ReplyLseek, ReplyOpen, ReplyRead, ReplyStatfs, ReplyWrite, Request, UtimeSpec};
-use libc::{c_int, ENOENT, ENOSYS, EROFS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY};
-use log::{error, trace, warn};
 
 use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::sql_fs::SqlFileSystem;
@@ -56,7 +63,19 @@ impl OpenFlags {
             no_access_time: flags & O_NOATIME != 0,
             path_only: flags & O_PATH != 0,
             tmp_file: flags & O_TMPFILE != 0,
-            other: flags & !(O_WRONLY | O_APPEND | O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY | O_NONBLOCK | O_SYNC | O_DSYNC | O_NOATIME | O_PATH | O_TMPFILE),
+            other: flags
+                & !(O_WRONLY
+                    | O_APPEND
+                    | O_CREAT
+                    | O_EXCL
+                    | O_TRUNC
+                    | O_NOCTTY
+                    | O_NONBLOCK
+                    | O_SYNC
+                    | O_DSYNC
+                    | O_NOATIME
+                    | O_PATH
+                    | O_TMPFILE),
         }
     }
 
@@ -160,23 +179,43 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn setattr(&mut self, _req: &Request, ino: u64, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>, size: Option<u64>, atime: UtimeSpec, mtime: UtimeSpec, fh: Option<u64>, crtime: Option<SystemTime>, chgtime: Option<SystemTime>, bkuptime: Option<SystemTime>, flags: Option<u32>, reply: ReplyAttr) {
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: UtimeSpec,
+        mtime: UtimeSpec,
+        fh: Option<u64>,
+        crtime: Option<SystemTime>,
+        chgtime: Option<SystemTime>,
+        bkuptime: Option<SystemTime>,
+        flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
         trace!("FS setattr(ino: {}, mode: {:?}, uid: {:?}, gid: {:?}, size: {:?}, atime: {:?}, mtime: {:?}, fh: {:?}, crtime: {:?}, chgtime: {:?}, bkuptime: {:?}, flags: {:?})", ino, mode, uid, gid, size, atime, mtime, fh, crtime, chgtime, bkuptime, flags);
 
         let atime = match atime {
             UtimeSpec::Now => Some(current_timestamp()),
             UtimeSpec::Omit => None,
-            UtimeSpec::Time(t) => Some(timestamp_from_system_time(t))
+            UtimeSpec::Time(t) => Some(timestamp_from_system_time(t)),
         };
 
         let mtime = match mtime {
             UtimeSpec::Now => Some(current_timestamp()),
             UtimeSpec::Omit => None,
-            UtimeSpec::Time(t) => Some(timestamp_from_system_time(t))
+            UtimeSpec::Time(t) => Some(timestamp_from_system_time(t)),
         };
 
         match self.fs.setattr(
-            ino as i64, mode, uid, gid, size,
+            ino as i64,
+            mode,
+            uid,
+            gid,
+            size,
             atime,
             mtime,
             crtime.map(|i| timestamp_from_system_time(i)),
@@ -200,7 +239,16 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn mknod(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, _rdev: u32, reply: ReplyEntry) {
+    fn mknod(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
         trace!("FS mknod(parent: {}, name: {:?}, mode: {}, umask: {}, rdev: {})", parent, name, mode, _umask, _rdev);
         let name = name.to_string_lossy();
         match self.fs.mknod(parent as i64, &name, req.uid(), req.gid(), mode) {
@@ -272,8 +320,22 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn rename(&mut self, _req: &Request, parent: u64, os_name: &OsStr, new_parent_id: u64, new_os_name: &OsStr, reply: ReplyEmpty) {
-        trace!("FS rename(parent: {}, name: {:?}, new_parent: {}, new_name: {:?})", parent, os_name, new_parent_id, new_os_name);
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        os_name: &OsStr,
+        new_parent_id: u64,
+        new_os_name: &OsStr,
+        reply: ReplyEmpty,
+    ) {
+        trace!(
+            "FS rename(parent: {}, name: {:?}, new_parent: {}, new_name: {:?})",
+            parent,
+            os_name,
+            new_parent_id,
+            new_os_name
+        );
 
         if parent == new_parent_id && os_name == new_os_name {
             reply.ok();
@@ -287,7 +349,10 @@ impl Filesystem for FuseFileSystem {
         match file {
             Some(file) => {
                 if self.open_files.values().any(|f| *f == file.id as u64) {
-                    error!("Error renaming file {} {:?} to {:?}, file in use ({:?})", file.id, old_name, new_name, self.open_files);
+                    error!(
+                        "Error renaming file {} {:?} to {:?}, file in use ({:?})",
+                        file.id, old_name, new_name, self.open_files
+                    );
                     reply.error(ENOSYS);
                     return;
                 }
@@ -300,7 +365,10 @@ impl Filesystem for FuseFileSystem {
 
         // Not allowed to move across directories
         if parent != new_parent_id {
-            match self.fs.move_file(parent as i64, &old_name, new_parent_id as i64, &new_name) {
+            match self
+                .fs
+                .move_file(parent as i64, &old_name, new_parent_id as i64, &new_name)
+            {
                 Ok(_) => {
                     reply.ok();
                 }
@@ -327,7 +395,16 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn rename2(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
+    fn rename2(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
         self.rename(_req, parent, name, newparent, newname, reply);
     }
 
@@ -373,7 +450,14 @@ impl Filesystem for FuseFileSystem {
     }
 
     fn write(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, data: &[u8], flags: u32, reply: ReplyWrite) {
-        trace!("FS write(ino: {}, file_handle: {}, offset: {}, data: {} B, flags: {})", ino, fh, offset, data.len(), flags);
+        trace!(
+            "FS write(ino: {}, file_handle: {}, offset: {}, data: {} B, flags: {})",
+            ino,
+            fh,
+            offset,
+            data.len(),
+            flags
+        );
         match self.fs.write(ino as i64, offset, data) {
             Ok(size) => {
                 reply.written(size as u32);
@@ -402,7 +486,16 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn release(&mut self, _req: &Request, ino: u64, fh: u64, _flags: u32, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        _flags: u32,
+        _lock_owner: u64,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
         trace!("FS release(ino: {}, file_handle: {}, flags: {})", ino, fh, _flags);
         match self.fs.release(ino as i64) {
             Ok(_) => {
@@ -410,7 +503,7 @@ impl Filesystem for FuseFileSystem {
                 reply.ok();
             }
             Err(e) => {
-                if e.code != EROFS {
+                if e.code != EROFS && e.code != ENOENT {
                     error!("Error releasing file: {:?}", e.error);
                 }
                 reply.error(e.code);
@@ -441,7 +534,11 @@ impl Filesystem for FuseFileSystem {
             Ok(entries) => {
                 let mut index = offset + 1;
                 for e in entries {
-                    let fuse_kind = if e.kind == FILE_KIND_DIRECTORY { FileType::Directory } else { FileType::RegularFile };
+                    let fuse_kind = if e.kind == FILE_KIND_DIRECTORY {
+                        FileType::Directory
+                    } else {
+                        FileType::RegularFile
+                    };
                     let ino = e.entry_file_id as u64;
                     if reply.add(ino, index, fuse_kind, e.name) {
                         break;
@@ -501,16 +598,7 @@ impl Filesystem for FuseFileSystem {
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
         trace!("FS statfs(ino: {})", _ino);
         let blocks = (1u64 << 40u64) / BLOCK_SIZE as u64;
-        reply.statfs(
-            blocks,
-            blocks,
-            blocks,
-            9999999,
-            9999999,
-            BLOCK_SIZE,
-            255,
-            BLOCK_SIZE,
-        );
+        reply.statfs(blocks, blocks, blocks, 9999999, 9999999, BLOCK_SIZE, 255, BLOCK_SIZE);
     }
 
     fn access(&mut self, _req: &Request, _ino: u64, _mask: u32, reply: ReplyEmpty) {
@@ -519,7 +607,16 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn create(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, _umask: u32, flags: u32, reply: ReplyCreate) {
+    fn create(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        flags: u32,
+        reply: ReplyCreate,
+    ) {
         trace!("FS create(parent: {}, name: {:?}, mode: {}, umask: {}, flags: {})", parent, name, mode, _umask, flags);
 
         let open_flags = OpenFlags::from(flags as i32);
@@ -527,9 +624,7 @@ impl Filesystem for FuseFileSystem {
 
         let name = name.to_string_lossy();
         let file = match self.fs.lookup(parent as i64, &name) {
-            Ok(Some(file)) => {
-                file
-            }
+            Ok(Some(file)) => file,
             Ok(None) => {
                 let res = self.fs.mknod(parent as i64, &name, req.uid(), req.gid(), mode);
 
@@ -539,7 +634,7 @@ impl Filesystem for FuseFileSystem {
                         reply.error(e.code);
                         return;
                     }
-                    Ok(file) => file
+                    Ok(file) => file,
                 }
             }
             Err(e) => {
@@ -565,14 +660,56 @@ impl Filesystem for FuseFileSystem {
         }
     }
 
-    fn getlk(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, _start: u64, _end: u64, _typ: u32, _pid: u32, reply: ReplyLock) {
-        trace!("FS getlk(ino: {}, file_handle: {}, lock_owner: {}, start: {}, end: {}, typ: {}, pid: {})", _ino, _fh, _lock_owner, _start, _end, _typ, _pid);
+    fn getlk(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        _start: u64,
+        _end: u64,
+        _typ: u32,
+        _pid: u32,
+        reply: ReplyLock,
+    ) {
+        trace!(
+            "FS getlk(ino: {}, file_handle: {}, lock_owner: {}, start: {}, end: {}, typ: {}, pid: {})",
+            _ino,
+            _fh,
+            _lock_owner,
+            _start,
+            _end,
+            _typ,
+            _pid
+        );
         warn!("Getlk not implemented");
         reply.error(ENOSYS);
     }
 
-    fn setlk(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, _start: u64, _end: u64, _typ: u32, _pid: u32, _sleep: bool, reply: ReplyEmpty) {
-        trace!("FS setlk(ino: {}, file_handle: {}, lock_owner: {}, start: {}, end: {}, typ: {}, pid: {}, sleep: {})", _ino, _fh, _lock_owner, _start, _end, _typ, _pid, _sleep);
+    fn setlk(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        _start: u64,
+        _end: u64,
+        _typ: u32,
+        _pid: u32,
+        _sleep: bool,
+        reply: ReplyEmpty,
+    ) {
+        trace!(
+            "FS setlk(ino: {}, file_handle: {}, lock_owner: {}, start: {}, end: {}, typ: {}, pid: {}, sleep: {})",
+            _ino,
+            _fh,
+            _lock_owner,
+            _start,
+            _end,
+            _typ,
+            _pid,
+            _sleep
+        );
         warn!("Setlk not implemented");
         reply.error(ENOSYS);
     }
@@ -583,8 +720,26 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn ioctl(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: u32, cmd: u32, _in_data: Option<&[u8]>, out_size: u32, reply: ReplyIoctl) {
-        trace!("FS ioctl(ino: {}, file_handle: {}, flags: {}, cmd: {}, in_data: {:?}, out_size: {})", ino, _fh, _flags, cmd, _in_data, out_size);
+    fn ioctl(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _flags: u32,
+        cmd: u32,
+        _in_data: Option<&[u8]>,
+        out_size: u32,
+        reply: ReplyIoctl,
+    ) {
+        trace!(
+            "FS ioctl(ino: {}, file_handle: {}, flags: {}, cmd: {}, in_data: {:?}, out_size: {})",
+            ino,
+            _fh,
+            _flags,
+            cmd,
+            _in_data,
+            out_size
+        );
         match cmd {
             //  Get the number of bytes available for reading.
             0x541B /* FIONREAD */ => {
@@ -619,7 +774,16 @@ impl Filesystem for FuseFileSystem {
         reply.error(ENOSYS);
     }
 
-    fn fallocate(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _offset: u64, _length: u64, _mode: u32, reply: ReplyEmpty) {
+    fn fallocate(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _offset: u64,
+        _length: u64,
+        _mode: u32,
+        reply: ReplyEmpty,
+    ) {
         trace!("FS fallocate(ino: {})", _ino);
         warn!("Operation fallocate not implemented");
         reply.error(ENOSYS);
@@ -642,7 +806,11 @@ impl From<&FileRow> for FileAttr {
             mtime: system_time_from_timestamp(value.updated_at),
             ctime: system_time_from_timestamp(value.updated_at),
             crtime: system_time_from_timestamp(value.created_at),
-            kind: if value.kind == 1 { FileType::Directory } else { FileType::RegularFile },
+            kind: if value.kind == 1 {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            },
             perm: value.perms as u16,
             nlink: if value.kind == 1 { 2 } else { 1 },
             uid: value.uid as u32,

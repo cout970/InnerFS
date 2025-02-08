@@ -11,6 +11,8 @@ mount_point: ./data
 # Primary storage backend, reads/writes will be performed here, replicas will be write-only
 # Values not set are inherited from the main configuration
 primary:
+  # Name of the storage backend, will be used as a tag in metadata
+  name: 'primary'
   # Storage backend, case-insensitive, can be either:
   # - filesystem: store blobs/objects on the local path, see [blob_storage]
   # - s3: store blobs/objects on an S3 compatible storage, see other S3 options
@@ -41,7 +43,7 @@ primary:
   # otherwise, the original full path will be preserved
   # Incompatible with encryption, use 'use_id_as_filename' instead
   use_hash_as_filename: false
-  # If the setting 'use_hash_as_filename' is false, will use the inode number as filename
+  # If the setting 'use_hash_as_filename' is false, will use the external_id of the file (random UUID) as filename
   use_id_as_filename: false
   # If set to true, the blobs will be versioned, and the old versions will be kept forever
   use_versioning: false
@@ -62,7 +64,7 @@ store_file_change_history: true
 # If set to true, any operation that would modify the database or the blobs will be rejected
 readonly: false
 
-### Default values for primary/replicas fields
+### Default values for undefined fields in primary/replicas
 blob_storage: ./blob
 s3_bucket: my-bucket
 s3_region: localhost
@@ -71,6 +73,6 @@ s3_access_key: '********************'
 s3_secret_key: '****************************************'
 encryption_key: ''
 compression_level: 0
-use_hash_as_filename: false
+use_versioning: false
 
 ########################################################################################################################

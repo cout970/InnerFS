@@ -6,13 +6,14 @@ use anyhow::{anyhow, Context};
 use env_logger::Env;
 use fs::File;
 use log::{error, info, warn};
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
-use std::{env, fs, thread};
 use std::sync::Arc;
+use std::{env, fs, thread};
 
 mod api;
 mod cli;
@@ -128,6 +129,7 @@ fn start_cli() {
         Commands::Stats => stats(fs).unwrap(),
         Commands::Verify => verify(fs).unwrap(),
         Commands::Webdav { address } => start_webdav_server(fs, address).unwrap(),
+        Commands::ImportIndex { format, path } => import_index(format, path).unwrap(),
     }
 }
 
@@ -433,7 +435,7 @@ fn stats(fs: SqlFileSystem) -> Result<(), AnyError> {
     Ok(())
 }
 
-// Verify integrity of the filesystem contents
+/// Verify integrity of the filesystem contents
 fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
     let total = fs
         .sql
@@ -504,5 +506,27 @@ fn verify(mut fs: SqlFileSystem) -> Result<(), AnyError> {
         info!("All {} files verified, no errors found", count);
     }
 
+    Ok(())
+}
+
+/// Import the file metadata index from a file
+fn import_index(format: IndexExportFormat, path: PathBuf) -> Result<(), AnyError> {
+    let output_file = "./imported_index.db";
+    info!("Importing index from {:?} to {:?}", &path, output_file);
+
+    let sql = Rc::new(MetadataDB::open(output_file));
+    sql.run_migrations().expect("Unable to run migrations");
+
+    let data = fs::read_to_string(&path).context("Unable to read index file")?;
+
+    let tree: FsTree = match format {
+        IndexExportFormat::Json => serde_json::from_str(&data).context("Unable to parse JSON")?,
+        IndexExportFormat::Yaml => serde_yml::from_str(&data).context("Unable to parse YAML")?,
+    };
+
+    // Remove previous data and settings
+    sql.nuke()?;
+    sql.import_tree(Rc::new(RefCell::new(tree)))?;
+    info!("Index imported successfully");
     Ok(())
 }

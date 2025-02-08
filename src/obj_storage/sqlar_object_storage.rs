@@ -94,10 +94,8 @@ impl ObjectStorage for SqlarObjectStorage {
 
 impl SqlarObjectStorage {
     pub fn get_sqlar_file(&mut self, name: &str) -> Result<Option<SqlarFile>, AnyError> {
-        self.sql.get_row(
-            "SELECT mode, mtime, sz, data FROM sqlar WHERE name = :name",
-            (":name", name),
-            |row| {
+        self.sql
+            .get_row("SELECT mode, mtime, sz, data FROM sqlar WHERE name = :name", (":name", name), |row| {
                 Ok(SqlarFile {
                     name: name.to_string(),
                     mode: row.read::<i64, _>(0)?,
@@ -105,8 +103,7 @@ impl SqlarObjectStorage {
                     sz: row.read::<i64, _>(2)?,
                     data: row.read::<Vec<u8>, _>(3)?,
                 })
-            },
-        )
+            })
     }
 
     pub fn set_sqlar_file(&mut self, name: &str, file: &SqlarFile) -> Result<(), AnyError> {

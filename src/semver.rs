@@ -25,10 +25,7 @@ impl Semver {
                 mayor: captures.name("mayor").unwrap().as_str().parse().unwrap(),
                 minor: captures.name("minor").unwrap().as_str().parse().unwrap(),
                 patch: captures.name("patch").unwrap().as_str().parse().unwrap(),
-                extra: captures
-                    .name("extra")
-                    .map_or("", |m| m.as_str())
-                    .to_string(),
+                extra: captures.name("extra").map_or("", |m| m.as_str()).to_string(),
             })
             .ok_or_else(|| anyhow::anyhow!("Invalid semver"))
     }

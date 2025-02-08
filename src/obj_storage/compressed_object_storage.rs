@@ -1,8 +1,8 @@
-use std::io::{Read, Write};
-use flate2::Compression;
-use crate::AnyError;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
+use flate2::Compression;
+use std::io::{Read, Write};
 
 pub struct CompressedObjectStorage {
     pub proxy: Box<dyn ObjectStorage>,

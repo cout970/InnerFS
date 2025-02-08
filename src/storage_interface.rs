@@ -1,18 +1,18 @@
-use std::cmp::min;
-use std::collections::{HashMap, HashSet};
-use anyhow::anyhow;
-use libc::{O_APPEND, O_RDONLY};
-use crate::AnyError;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
 use crate::fuse_fs::OpenFlags;
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY};
+use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::{ObjInUseFn, Storage};
 use crate::utils::current_timestamp;
+use crate::AnyError;
+use anyhow::anyhow;
+use libc::{O_APPEND, O_RDONLY};
+use std::cmp::min;
+use std::collections::HashMap;
 
 pub struct StorageInterface {
     pub obj_storage: Box<dyn ObjectStorage>,
     pub cache: HashMap<i64, StorageInterfaceCache>,
-    pub pending_remove: HashSet<ObjInfo>,
+    pub pending_remove: HashMap<i64, ObjInfo>,
 }
 
 pub struct StorageInterfaceCache {
@@ -29,7 +29,7 @@ impl StorageInterface {
         Self {
             obj_storage,
             cache: HashMap::new(),
-            pending_remove: HashSet::new(),
+            pending_remove: HashMap::new(),
         }
     }
 }
@@ -48,35 +48,42 @@ impl Storage for StorageInterface {
                 let prev_flags = OpenFlags::from(cache.mode);
                 let new_flags = OpenFlags::from(mode as i32);
                 // Only allowed to open in read mode if it was previously opened in read mode
-                let valid = prev_flags.read_only && new_flags.read_only && !prev_flags.exclusive && !new_flags.exclusive;
+                let valid =
+                    prev_flags.read_only && new_flags.read_only && !prev_flags.exclusive && !new_flags.exclusive;
 
                 if !valid {
                     return Err(anyhow!(
                         "File {} is already open in write mode:\n  prev={:?},\n  new={:?}",
-                        file.id, prev_flags, new_flags)
-                    );
+                        file.id,
+                        prev_flags,
+                        new_flags
+                    ));
                 }
 
                 cache.count += 1;
             }
         }
 
-        self.cache.insert(file.id, StorageInterfaceCache {
-            full_path: full_path.to_string(),
-            mode: mode as i32,
-            content: vec![],
-            retrieved: false,
-            modified: false,
-            count: 1,
-        });
+        self.cache.insert(
+            file.id,
+            StorageInterfaceCache {
+                full_path: full_path.to_string(),
+                mode: mode as i32,
+                content: vec![],
+                retrieved: false,
+                modified: false,
+                count: 1,
+            },
+        );
 
         Ok(false)
     }
 
     fn read(&mut self, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
-        let row = self.cache.get_mut(&file.id).ok_or_else(||
-            anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
-        )?;
+        let row = self
+            .cache
+            .get_mut(&file.id)
+            .ok_or_else(|| anyhow!("Trying to use a file that was closed or never opened: {}", file.id))?;
 
         if row.mode & libc::O_WRONLY != 0 {
             return Err(anyhow::anyhow!("File is write-only ({})", file.name));
@@ -104,9 +111,10 @@ impl Storage for StorageInterface {
     }
 
     fn write(&mut self, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
-        let row = self.cache.get_mut(&file.id).ok_or_else(||
-            anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
-        )?;
+        let row = self
+            .cache
+            .get_mut(&file.id)
+            .ok_or_else(|| anyhow!("Trying to use a file that was closed or never opened: {}", file.id))?;
 
         if row.mode & O_RDONLY != 0 {
             return Err(anyhow::anyhow!("File is read-only"));
@@ -118,7 +126,6 @@ impl Storage for StorageInterface {
         }
 
         let offset = offset as usize;
-
 
         if offset == buff.len() {
             // Append to the end
@@ -137,9 +144,10 @@ impl Storage for StorageInterface {
 
     fn close(&mut self, file: &mut FileRow) -> Result<bool, AnyError> {
         let count = {
-            let row = self.cache.get_mut(&file.id).ok_or_else(||
-                anyhow!("Trying to use a file that was closed or never opened: {}", file.id)
-            )?;
+            let row = self
+                .cache
+                .get_mut(&file.id)
+                .ok_or_else(|| anyhow!("Trying to use a file that was closed or never opened: {}", file.id))?;
 
             row.count -= 1;
             row.count
@@ -174,11 +182,16 @@ impl Storage for StorageInterface {
             // Shas of contents as id for the object
             let sha512 = hex::encode(hmac_sha512::Hash::hash(&row.content));
 
+            // This operation was disabled on purpose
+            // When the storage backend uses a sha512 as the object id, new write will create a new object
+            // so the old object needs to be removed, however, this is not always the case.
+            // If the backend uses the original file path or the external_id as the object id,
+            // removing the old object, which is done at cleanup, will remove the recently overwritten object.
             // Remove old object
-            if !file.sha512.is_empty() && file.sha512 != sha512 {
-                let info = ObjInfo::new(file, &row.full_path);
-                self.pending_remove.insert(info);
-            }
+            // if !file.sha512.is_empty() && file.sha512 != sha512 {
+            //     let info = ObjInfo::new(file, &row.full_path);
+            //     self.overrided_objects.push(info.id, info);
+            // }
 
             file.sha512 = sha512;
             let mut info = ObjInfo::new(file, &row.full_path);
@@ -198,11 +211,13 @@ impl Storage for StorageInterface {
     }
 
     fn remove(&mut self, file: &FileRow, full_path: &str) -> Result<(), AnyError> {
+        // TODO allow unlink while the files still exists and auto-remove it once no more open handlers are remaining
         if self.cache.contains_key(&file.id) {
             return Err(anyhow!("File is open, cannot remove"));
         }
+
         if !file.sha512.is_empty() {
-            self.pending_remove.insert(ObjInfo::new(file, full_path));
+            self.pending_remove.insert(file.id, ObjInfo::new(file, full_path));
         }
         Ok(())
     }
@@ -225,7 +240,7 @@ impl Storage for StorageInterface {
     }
 
     fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        for info in &self.pending_remove {
+        for (_id, info) in &self.pending_remove {
             self.obj_storage.remove(info, is_in_use.clone())?;
         }
 
@@ -243,7 +258,7 @@ impl Storage for StorageInterface {
         Box::new(Self {
             obj_storage: self.obj_storage.clone(),
             cache: HashMap::new(),
-            pending_remove: HashSet::new(),
+            pending_remove: HashMap::new(),
         })
     }
 }

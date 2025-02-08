@@ -9,8 +9,8 @@ use std::ffi::OsStr;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::{env, fs};
 use std::sync::Arc;
+use std::{env, fs};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct YamlConfig {
@@ -109,15 +109,11 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
             .map(String::from)
             .unwrap();
 
-        return Err(anyhow!(
-            "Config file not found at {:?}, try './{} generate-config'",
-            &config_path,
-            program_name
-        ));
+        return Err(anyhow!("Config file not found at {:?}, try './{} generate-config'", &config_path, program_name));
     }
 
-    let yaml_config = fs::read_to_string(config_path)
-        .map_err(|e| anyhow!("Unable to read config file {:?}: {}", config_path, e))?;
+    let yaml_config =
+        fs::read_to_string(config_path).map_err(|e| anyhow!("Unable to read config file {:?}: {}", config_path, e))?;
 
     let config: YamlConfig = serde_yml::from_str(&yaml_config)
         .map_err(|e| anyhow!("Unable to parse YAML config file {:?}: {}", config_path, e))?;
@@ -129,16 +125,14 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
 
     if let Some(p) = primary.clone() {
         if p.use_id_as_filename.unwrap_or(false) {
-            path_generation = PathGenerator::Id;
+            path_generation = PathGenerator::ExternalId;
         } else if p.use_hash_as_filename.unwrap_or(false) {
             path_generation = PathGenerator::Sha512;
         }
     }
 
     let primary = Arc::new(StorageConfig {
-        name: primary
-            .and_then(|p| p.name.clone())
-            .unwrap_or("primary".to_string()),
+        name: primary.and_then(|p| p.name.clone()).unwrap_or("primary".to_string()),
         storage_backend: StorageOption::from_string(
             &primary
                 .and_then(|p| p.storage_backend.clone())
@@ -205,7 +199,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
         let mut path_generation = PathGenerator::Path;
 
         if replica.use_id_as_filename.unwrap_or(false) {
-            path_generation = PathGenerator::Id;
+            path_generation = PathGenerator::ExternalId;
         } else if replica.use_hash_as_filename.unwrap_or(false) {
             path_generation = PathGenerator::Sha512;
         }
@@ -213,10 +207,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
         cfg.replicas.push(Arc::new(StorageConfig {
             name: replica.name.clone().unwrap_or(format!("replica{}", index)),
             storage_backend: StorageOption::from_string(
-                &replica
-                    .storage_backend
-                    .clone()
-                    .or(config.storage_backend.clone()),
+                &replica.storage_backend.clone().or(config.storage_backend.clone()),
             )?,
             blob_storage: replica
                 .blob_storage
@@ -300,11 +291,7 @@ fn extract_encryption_key(value: YamlEncryptionKeyConfig) -> String {
     }
 }
 
-pub fn check_config_changes(
-    prefix: &str,
-    config: Arc<StorageConfig>,
-    sql: Rc<MetadataDB>,
-) -> Result<(), AnyError> {
+pub fn check_config_changes(prefix: &str, config: Arc<StorageConfig>, sql: Rc<MetadataDB>) -> Result<(), AnyError> {
     // Changing storage_option will make all the files not available
     let setting_storage_option = format!("{}:storage_option", prefix);
     let storage_option = config.storage_backend.to_string();
@@ -313,9 +300,7 @@ pub fn check_config_changes(
         if let Some(setting) = setting {
             if setting != storage_option {
                 error!("Storage option changed from {} to {}, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem", setting, storage_option);
-                if !ask_for_confirmation(
-                    "Do you want to proceed anyways? Type 'yes' or 'y' to confirm",
-                ) {
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
@@ -330,8 +315,7 @@ pub fn check_config_changes(
     if let Some(setting) = sql.get_setting(&setting_encryption_key_hash)? {
         if setting != encryption_key {
             error!("Encryption key changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm")
-            {
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                 return Err(anyhow!("Operation cancelled"));
             }
         }
@@ -346,9 +330,7 @@ pub fn check_config_changes(
         if let Some(setting) = setting {
             if setting != path_generator {
                 error!("use_hash_as_filename or use_id_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-                if !ask_for_confirmation(
-                    "Do you want to proceed anyways? Type 'yes' or 'y' to confirm",
-                ) {
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
@@ -384,8 +366,7 @@ pub fn check_config_changes(
 
         if changed {
             error!("S3 settings changed, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem");
-            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm")
-            {
+            if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                 return Err(anyhow!("Operation cancelled"));
             }
         }
@@ -398,16 +379,12 @@ pub fn check_config_changes(
     // Changing blob_storage will make all the files not available
     let blob_storage = format!("{}:blob_storage", prefix);
 
-    if config.storage_backend == StorageOption::FileSystem
-        || config.storage_backend == StorageOption::RocksDb
-    {
+    if config.storage_backend == StorageOption::FileSystem || config.storage_backend == StorageOption::RocksDb {
         let setting = sql.get_setting(&blob_storage)?;
         if let Some(setting) = setting {
             if setting != config.blob_storage {
                 error!("Blob storage changed from {} to {}, this will make the data inaccesible, it's recommended to revert the setting or recreate the filesystem", setting, config.blob_storage);
-                if !ask_for_confirmation(
-                    "Do you want to proceed anyways? Type 'yes' or 'y' to confirm",
-                ) {
+                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
                     return Err(anyhow!("Operation cancelled"));
                 }
             }
@@ -443,14 +420,14 @@ fn validate_storage(cfg: &StorageConfig) -> Result<(), Error> {
     }
 
     if !cfg.encryption_key.is_empty() && cfg.path_generator == PathGenerator::Sha512 {
-        errors.push("The option use_hash_as_filename is incompatible with encryption, use use_id_as_filename instead".to_string());
+        errors.push(
+            "The option use_hash_as_filename is incompatible with encryption, use use_id_as_filename instead"
+                .to_string(),
+        );
     }
 
     if !errors.is_empty() {
-        return Err(anyhow!(
-            "Config errors detected:\n - {}",
-            errors.join("\n - ")
-        ));
+        return Err(anyhow!("Config errors detected:\n - {}", errors.join("\n - ")));
     }
 
     Ok(())
@@ -526,7 +503,7 @@ impl StorageConfig {
                     format!("{}.dat", &info.sha512[..32])
                 }
             }
-            PathGenerator::Id => info.id.to_string(),
+            PathGenerator::ExternalId => info.external_id.to_string(),
             PathGenerator::Path => info.full_path.trim_start_matches('/').to_string(),
         }
     }

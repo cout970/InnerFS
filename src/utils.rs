@@ -1,6 +1,6 @@
+use chrono::DateTime;
 use std::ops::{Add, Sub};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use chrono::{DateTime};
 
 pub fn humanize_bytes_binary(value: usize) -> String {
     use ::core::fmt::Write;

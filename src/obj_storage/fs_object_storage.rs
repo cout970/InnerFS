@@ -47,10 +47,18 @@ impl ObjectStorage for FsObjectStorage {
             return Ok(());
         }
 
-        debug!("Remove: {:?}", &path);
+        debug!("Remove: {:?} ({})", &path, info.id);
 
-        fs::remove_file(&path)
-            .map_err(|e| anyhow!("FS failed to remove file '{:?}': {:?}", path, e))
+        match fs::remove_file(&path) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(anyhow!("FS failed to remove file '{:?}': {:?}", path, e))
+                }
+            }
+        }
     }
 
     fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
@@ -71,14 +79,8 @@ impl ObjectStorage for FsObjectStorage {
         if let Some(parent) = new_path.parent() {
             fs::create_dir_all(parent).context("FS failed to create dir")?;
         }
-        fs::rename(&prev_path, &new_path).map_err(|e| {
-            anyhow!(
-                "FS failed to rename '{:?}' -> '{:?}': {:?}",
-                prev_path,
-                new_path,
-                e
-            )
-        })
+        fs::rename(&prev_path, &new_path)
+            .map_err(|e| anyhow!("FS failed to rename '{:?}' -> '{:?}': {:?}", prev_path, new_path, e))
     }
 
     fn nuke(&mut self) -> Result<(), AnyError> {

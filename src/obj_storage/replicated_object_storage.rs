@@ -1,6 +1,6 @@
-use crate::AnyError;
 use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage::ObjInUseFn;
+use crate::AnyError;
 
 pub struct ReplicatedObjectStorage {
     pub primary: Box<dyn ObjectStorage>,

@@ -6,13 +6,13 @@ use crate::obj_storage::fs_object_storage::FsObjectStorage;
 use crate::obj_storage::rocks_db_object_storage::RocksDbObjectStorage;
 use crate::obj_storage::s3_object_storage::S3ObjectStorage;
 use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
+use crate::obj_storage::versioned_object_storage::VersionedObjectStorage;
 use crate::storage::ObjInUseFn;
 use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use crate::obj_storage::versioned_object_storage::VersionedObjectStorage;
 
 // Storage backends
 pub mod debug_object_storage;
@@ -32,6 +32,7 @@ pub struct ObjInfo {
     pub id: i64,
     pub version: i64,
     pub name: String,
+    pub external_id: String,
     pub full_path: String,
     pub sha512: String,
     pub created_at: i64,
@@ -52,8 +53,8 @@ pub enum PathGenerator {
     Path,
     // Check if there are other files with the same content
     Sha512,
-    // Check if there are other files with the same path (based on file id)
-    Id,
+    // Check if there are other files with the same path (based on file external_id)
+    ExternalId,
 }
 
 impl PathGenerator {
@@ -61,7 +62,7 @@ impl PathGenerator {
         match self {
             PathGenerator::Path => "path".to_string(),
             PathGenerator::Sha512 => "sha512".to_string(),
-            PathGenerator::Id => "id".to_string(),
+            PathGenerator::ExternalId => "external_id".to_string(),
         }
     }
 }
@@ -87,6 +88,7 @@ impl ObjInfo {
             id: file.id,
             version: file.version,
             name: file.name.to_string(),
+            external_id: file.external_id.to_string(),
             full_path: full_path.to_string(),
             sha512: file.sha512.to_string(),
             created_at: file.created_at,
@@ -100,10 +102,7 @@ impl ObjInfo {
     }
 }
 
-pub fn create_object_storage(
-    config: Arc<StorageConfig>,
-    sql: Rc<MetadataDB>,
-) -> Box<dyn ObjectStorage> {
+pub fn create_object_storage(config: Arc<StorageConfig>, sql: Rc<MetadataDB>) -> Box<dyn ObjectStorage> {
     let mut obj_storage: Box<dyn ObjectStorage> = match &config.storage_backend {
         StorageOption::FileSystem => Box::new(FsObjectStorage {
             base_path: PathBuf::from(&config.blob_storage),
@@ -122,10 +121,7 @@ pub fn create_object_storage(
         obj_storage = Box::new(EncryptedObjectStorage::new(config.clone(), obj_storage));
     } else if config.compression_level > 0 {
         // Apply compression if a level is provided
-        obj_storage = Box::new(CompressedObjectStorage::new(
-            obj_storage,
-            config.compression_level,
-        ));
+        obj_storage = Box::new(CompressedObjectStorage::new(obj_storage, config.compression_level));
     }
 
     if config.use_versioning {

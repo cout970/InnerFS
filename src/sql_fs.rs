@@ -1,20 +1,15 @@
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::rc::Rc;
-use std::sync::Arc;
 use crate::config::Config;
-use crate::metadata_db::{
-    DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR,
-};
+use crate::metadata_db::{DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
 use crate::obj_storage::{ObjInfo, PathGenerator};
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use crate::AnyError;
 use anyhow::{anyhow, Context};
-use libc::{
-    EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, EROFS, O_RDONLY, O_RDWR,
-    O_WRONLY,
-};
+use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, EROFS, O_RDONLY, O_RDWR, O_WRONLY};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct SqlFileSystem {
     pub sql: Rc<MetadataDB>,
@@ -30,11 +25,7 @@ pub struct SqlFileSystemError {
 
 impl SqlFileSystem {
     pub fn new(sql: Rc<MetadataDB>, config: Arc<Config>, storage: Box<dyn Storage>) -> Self {
-        Self {
-            sql,
-            config,
-            storage,
-        }
+        Self { sql, config, storage }
     }
 
     pub fn read_all(&mut self, id: i64) -> Result<Vec<u8>, SqlFileSystemError> {
@@ -48,12 +39,10 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
             }
         } else if self.config.update_access_time {
-            self.sql
-                .file_set_access_time(file.id, current_timestamp())?;
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
 
         let mut complete_buff: Vec<u8> = Vec::with_capacity(file.size as usize);
@@ -74,12 +63,10 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
             }
         } else if self.config.update_access_time {
-            self.sql
-                .file_set_access_time(file.id, current_timestamp())?;
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
 
         self.cleanup()?;
@@ -97,12 +84,10 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
             }
         } else if self.config.update_access_time {
-            self.sql
-                .file_set_access_time(file.id, current_timestamp())?;
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
 
         let mut offset = 0;
@@ -130,12 +115,10 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
             }
         } else if self.config.update_access_time {
-            self.sql
-                .file_set_access_time(file.id, current_timestamp())?;
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
 
         self.cleanup()?;
@@ -175,6 +158,7 @@ impl SqlFileSystem {
                 entry_file_id: file.id,
                 name: new_name.to_string(),
                 kind: file.kind,
+                external_id: "".to_string(),
             })?;
 
             // Update file metadata
@@ -196,8 +180,7 @@ impl SqlFileSystem {
                 let old_parent = this.get_file_or_err(parent_id)?;
                 let new_parent = this.get_file_or_err(new_parent_id)?;
 
-                this.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                this.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
                 this.sql
                     .register_file_change(&old_parent, FileChangeKind::UpdatedContents)?;
                 this.sql
@@ -253,11 +236,7 @@ impl SqlFileSystem {
                 sha512: "".to_string(),
                 encryption_key: "".to_string(),
                 compression: "".to_string(),
-                accessed_at: if this.config.update_access_time {
-                    now
-                } else {
-                    0
-                },
+                accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
             };
@@ -271,6 +250,7 @@ impl SqlFileSystem {
                 entry_file_id: new_file.id,
                 name: new_name.to_string(),
                 kind: file.kind,
+                external_id: "".to_string(),
             })?;
 
             // Copy file contents
@@ -283,8 +263,7 @@ impl SqlFileSystem {
             }
 
             if this.config.store_file_change_history {
-                this.sql
-                    .register_file_change(&new_file, FileChangeKind::Created)?;
+                this.sql.register_file_change(&new_file, FileChangeKind::Created)?;
                 this.sql
                     .register_file_change(&new_parent, FileChangeKind::UpdatedContents)?;
             }
@@ -328,11 +307,7 @@ impl SqlFileSystem {
         Ok(self.sql.get_file_parent_id(id)?)
     }
 
-    pub fn lookup(
-        &mut self,
-        parent: i64,
-        name: &str,
-    ) -> Result<Option<FileRow>, SqlFileSystemError> {
+    pub fn lookup(&mut self, parent: i64, name: &str) -> Result<Option<FileRow>, SqlFileSystemError> {
         let dir_file = self.get_file_or_err(parent)?;
 
         if dir_file.kind != FILE_KIND_DIRECTORY {
@@ -400,8 +375,7 @@ impl SqlFileSystem {
             this.sql.update_file(&file)?;
 
             if this.config.store_file_change_history {
-                this.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+                this.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
             }
             Ok(file)
         })
@@ -439,11 +413,7 @@ impl SqlFileSystem {
                 sha512: "".to_string(),
                 encryption_key: "".to_string(),
                 compression: "".to_string(),
-                accessed_at: if this.config.update_access_time {
-                    now
-                } else {
-                    0
-                },
+                accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
             };
@@ -458,6 +428,7 @@ impl SqlFileSystem {
                 entry_file_id: id,
                 name: ".".to_string(),
                 kind: FILE_KIND_DIRECTORY,
+                external_id: "".to_string(),
             })?;
 
             // child entry to parent
@@ -467,6 +438,7 @@ impl SqlFileSystem {
                 entry_file_id: parent,
                 name: "..".to_string(),
                 kind: FILE_KIND_DIRECTORY,
+                external_id: "".to_string(),
             })?;
 
             // parent entry to child
@@ -476,6 +448,7 @@ impl SqlFileSystem {
                 entry_file_id: id,
                 name: name.to_string(),
                 kind: file.kind,
+                external_id: "".to_string(),
             })?;
 
             if this.config.update_access_time {
@@ -483,8 +456,7 @@ impl SqlFileSystem {
             }
 
             if this.config.store_file_change_history {
-                this.sql
-                    .register_file_change(&file, FileChangeKind::Created)?;
+                this.sql.register_file_change(&file, FileChangeKind::Created)?;
                 this.sql
                     .register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
             }
@@ -510,10 +482,7 @@ impl SqlFileSystem {
 
         let regular = mode & libc::S_IFREG != 0;
         if !regular {
-            return error(
-                ENOTSUP,
-                anyhow!("Only regular files are supported in mknod: mode = {}", mode),
-            );
+            return error(ENOTSUP, anyhow!("Only regular files are supported in mknod: mode = {}", mode));
         }
 
         let parent_directory = self.get_file_or_err(parent)?;
@@ -543,11 +512,7 @@ impl SqlFileSystem {
                 sha512: "".to_string(),
                 encryption_key: "".to_string(),
                 compression: "".to_string(),
-                accessed_at: if this.config.update_access_time {
-                    now
-                } else {
-                    0
-                },
+                accessed_at: if this.config.update_access_time { now } else { 0 },
                 created_at: now,
                 updated_at: now,
             };
@@ -562,6 +527,7 @@ impl SqlFileSystem {
                 entry_file_id: id,
                 name: name.to_string(),
                 kind: file.kind,
+                external_id: "".to_string(),
             })?;
 
             if this.config.update_access_time {
@@ -569,8 +535,7 @@ impl SqlFileSystem {
             }
 
             if this.config.store_file_change_history {
-                this.sql
-                    .register_file_change(&file, FileChangeKind::Created)?;
+                this.sql.register_file_change(&file, FileChangeKind::Created)?;
                 this.sql
                     .register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
             }
@@ -601,8 +566,7 @@ impl SqlFileSystem {
         self.sql.remove_file(dir_entry.entry_file_id)?;
 
         if self.config.store_file_change_history {
-            self.sql
-                .register_file_change(&file, FileChangeKind::Deleted)?;
+            self.sql.register_file_change(&file, FileChangeKind::Deleted)?;
             self.sql
                 .register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
         }
@@ -627,9 +591,7 @@ impl SqlFileSystem {
             return error(ENOTDIR, anyhow!("Not a directory: {}", file.id));
         }
 
-        let entries = self
-            .sql
-            .get_directory_entries_limit(dir_entry.entry_file_id, 10, 0)?;
+        let entries = self.sql.get_directory_entries_limit(dir_entry.entry_file_id, 10, 0)?;
 
         // Cannot delete non-empty directory
         if entries.len() > 2 {
@@ -640,20 +602,14 @@ impl SqlFileSystem {
         self.cleanup()?;
 
         if self.config.store_file_change_history {
-            self.sql
-                .register_file_change(&file, FileChangeKind::Deleted)?;
+            self.sql.register_file_change(&file, FileChangeKind::Deleted)?;
             self.sql
                 .register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
         }
         Ok(())
     }
 
-    pub fn rename(
-        &mut self,
-        parent: i64,
-        old_name: &str,
-        new_name: &str,
-    ) -> Result<(), SqlFileSystemError> {
+    pub fn rename(&mut self, parent: i64, old_name: &str, new_name: &str) -> Result<(), SqlFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -671,10 +627,7 @@ impl SqlFileSystem {
         if let Some(new_entry) = new_entry {
             match new_entry.kind {
                 FILE_KIND_DIRECTORY => {
-                    return error(
-                        EISDIR,
-                        anyhow!("Cannot overwrite directory: {} -> {}", old_name, new_name),
-                    );
+                    return error(EISDIR, anyhow!("Cannot overwrite directory: {} -> {}", old_name, new_name));
                 }
                 FILE_KIND_REGULAR => {
                     // When moving into an existing file, unlink it first
@@ -703,8 +656,7 @@ impl SqlFileSystem {
             this.storage.rename(&file, &prev_path, &new_path)?;
 
             if this.config.store_file_change_history {
-                this.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                this.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
                 this.sql
                     .register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
             }
@@ -716,8 +668,7 @@ impl SqlFileSystem {
     pub fn open(&mut self, id: i64, flags: u32) -> Result<(), SqlFileSystemError> {
         let mut file = self.get_file_or_err(id)?;
 
-        if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0)
-        {
+        if self.config.readonly && ((flags & O_WRONLY as u32) != 0 || (flags & O_RDWR as u32) != 0) {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
 
@@ -737,23 +688,16 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedMetadata)?;
             }
         } else if self.config.update_access_time {
-            self.sql
-                .file_set_access_time(file.id, current_timestamp())?;
+            self.sql.file_set_access_time(file.id, current_timestamp())?;
         }
 
         Ok(())
     }
 
-    pub fn read(
-        &mut self,
-        id: i64,
-        offset: i64,
-        size: usize,
-    ) -> Result<Vec<u8>, SqlFileSystemError> {
+    pub fn read(&mut self, id: i64, offset: i64, size: usize) -> Result<Vec<u8>, SqlFileSystemError> {
         let file = self.get_file_or_err(id)?;
 
         let mut buff = vec![0u8; size];
@@ -762,12 +706,7 @@ impl SqlFileSystem {
         Ok(buff)
     }
 
-    pub fn write(
-        &mut self,
-        id: i64,
-        offset: i64,
-        data: &[u8],
-    ) -> Result<usize, SqlFileSystemError> {
+    pub fn write(&mut self, id: i64, offset: i64, data: &[u8]) -> Result<usize, SqlFileSystemError> {
         if self.config.readonly {
             return error(EROFS, anyhow!("Read-only filesystem"));
         }
@@ -785,8 +724,7 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
             }
         }
 
@@ -801,8 +739,7 @@ impl SqlFileSystem {
             self.sql.update_file(&file)?;
 
             if self.config.store_file_change_history {
-                self.sql
-                    .register_file_change(&file, FileChangeKind::UpdatedContents)?;
+                self.sql.register_file_change(&file, FileChangeKind::UpdatedContents)?;
             }
         }
 
@@ -810,11 +747,7 @@ impl SqlFileSystem {
         Ok(())
     }
 
-    pub fn readdir(
-        &mut self,
-        id: i64,
-        offset: i64,
-    ) -> Result<Vec<DirectoryEntry>, SqlFileSystemError> {
+    pub fn readdir(&mut self, id: i64, offset: i64) -> Result<Vec<DirectoryEntry>, SqlFileSystemError> {
         let entries = self.sql.get_directory_entries_limit(id, 1024, offset)?;
 
         if self.config.update_access_time {
@@ -826,21 +759,16 @@ impl SqlFileSystem {
 
     pub fn cleanup(&mut self) -> Result<(), SqlFileSystemError> {
         let sql = self.sql.clone();
-        self.storage.cleanup(Rc::new(move |info, test| {
-            Self::file_is_in_use(&sql, info, test)
-        }))?;
+        self.storage
+            .cleanup(Rc::new(move |info, test| Self::file_is_in_use(&sql, info, test)))?;
         Ok(())
     }
 
-    fn file_is_in_use(
-        sql: &Rc<MetadataDB>,
-        info: &ObjInfo,
-        test: PathGenerator,
-    ) -> Result<bool, AnyError> {
+    fn file_is_in_use(sql: &Rc<MetadataDB>, info: &ObjInfo, test: PathGenerator) -> Result<bool, AnyError> {
         let exists = match test {
             PathGenerator::Path => sql.get_file_by_path(&info.full_path)?.is_some(),
             PathGenerator::Sha512 => sql.get_file_by_sha512(&info.sha512)?.is_some(),
-            PathGenerator::Id => sql.get_file(info.id)?.is_some(),
+            PathGenerator::ExternalId => sql.get_file(info.id)?.is_some(),
         };
         Ok(exists)
     }
@@ -855,11 +783,7 @@ impl SqlFileSystem {
         Ok(file.unwrap())
     }
 
-    pub fn find_directory_entry_or_err(
-        &mut self,
-        id: i64,
-        name: &str,
-    ) -> Result<DirectoryEntry, SqlFileSystemError> {
+    pub fn find_directory_entry_or_err(&mut self, id: i64, name: &str) -> Result<DirectoryEntry, SqlFileSystemError> {
         let entry = self.sql.find_directory_entry(id, name)?;
 
         if entry.is_none() {
@@ -883,15 +807,9 @@ impl SqlFileSystem {
             .context("Database error")?;
         let res = func(self);
         if res.is_ok() {
-            self.sql
-                .connection
-                .execute("COMMIT")
-                .context("Database error")?;
+            self.sql.connection.execute("COMMIT").context("Database error")?;
         } else {
-            self.sql
-                .connection
-                .execute("ROLLBACK")
-                .context("Database error")?;
+            self.sql.connection.execute("ROLLBACK").context("Database error")?;
         }
         res
     }

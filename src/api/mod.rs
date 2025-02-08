@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use log::{error, info};
 use std::sync::Arc;
 use std::thread;
-use tiny_http::{Server};
+use tiny_http::Server;
 use webdav::*;
 
 mod webdav;

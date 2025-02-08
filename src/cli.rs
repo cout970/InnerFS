@@ -57,6 +57,16 @@ pub enum Commands {
         #[arg(short, long, value_name = "ADDRESS")]
         address: Option<String>,
     },
+    /// Import the file metadata index from a file
+    ImportIndex {
+        /// Import format: json or yaml
+        #[arg(short, long, value_enum, default_value_t = IndexExportFormat::Json)]
+        format: IndexExportFormat,
+
+        /// Import path
+        #[arg(short, long, value_name = "FILE")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

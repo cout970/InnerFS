@@ -11,6 +11,7 @@ use aes_gcm::{
     Aes256Gcm,
 };
 use anyhow::{anyhow, Error};
+use itertools::Itertools;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use std::rc::Rc;
@@ -43,12 +44,7 @@ fn vec_to_array<T, const N: usize>(v: Vec<T>) -> Result<[T; N], Error> {
 
 impl FileKey {
     pub fn serialize(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            hex::encode(self.salt),
-            hex::encode(self.nonce),
-            self.aead
-        )
+        format!("{}:{}:{}", hex::encode(self.salt), hex::encode(self.nonce), self.aead)
     }
 
     pub fn deserialize(s: &str) -> Result<FileKey, Error> {
@@ -99,11 +95,7 @@ impl EncryptedObjectStorage {
         key1
     }
 
-    pub fn encrypt(
-        private_key: &str,
-        content: &[u8],
-        content_sha512: &str,
-    ) -> Result<(FileKey, Vec<u8>), Error> {
+    pub fn encrypt(private_key: &str, content: &[u8], content_sha512: &str) -> Result<(FileKey, Vec<u8>), Error> {
         let salt = Self::generate_salt();
         let aes_key = Self::salt_password(private_key, &salt);
 
@@ -119,11 +111,7 @@ impl EncryptedObjectStorage {
         Ok((file_key, ciphertext))
     }
 
-    pub fn encrypt_internal(
-        aes_key: &[u8; AES_KEY_LEN],
-        key: &FileKey,
-        content: &[u8],
-    ) -> Result<Vec<u8>, Error> {
+    pub fn encrypt_internal(aes_key: &[u8; AES_KEY_LEN], key: &FileKey, content: &[u8]) -> Result<Vec<u8>, Error> {
         let mut nonce: GenericArray<u8, U12> = Nonce::<Aes256Gcm>::default();
         nonce.copy_from_slice(&key.nonce);
 
@@ -142,11 +130,7 @@ impl EncryptedObjectStorage {
         Ok(ciphertext)
     }
 
-    pub fn decrypt(
-        private_key: &str,
-        file_key: &FileKey,
-        ciphertext: &[u8],
-    ) -> Result<Vec<u8>, Error> {
+    pub fn decrypt(private_key: &str, file_key: &FileKey, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
         let aes_key = Self::salt_password(private_key, &file_key.salt);
         let plaintext = Self::decrypt_internal(&aes_key, file_key, ciphertext)?;
 
@@ -176,7 +160,7 @@ impl EncryptedObjectStorage {
         Ok(plaintext)
     }
 
-    fn path(&self, _key: &FileKey, original_path: &str, id: i64) -> String {
+    fn path(&self, _key: &FileKey, original_path: &str, external_id: &str) -> String {
         match self.config.path_generator {
             PathGenerator::Path => original_path.to_string(),
             PathGenerator::Sha512 => {
@@ -184,7 +168,7 @@ impl EncryptedObjectStorage {
                 let sha512 = hex::encode(hmac_sha512::Hash::hash(original_path.as_bytes()));
                 format!("{}.enc", &sha512[..32])
             }
-            PathGenerator::Id => format!("{}.enc", id),
+            PathGenerator::ExternalId => format!("{}.enc", external_id),
         }
     }
 
@@ -244,16 +228,20 @@ impl ObjectStorage for EncryptedObjectStorage {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
         let keys = Self::get_keys_from_keychain(&info.encryption_key, &self.config.name)?;
 
-        fn try_key(
-            this: &mut EncryptedObjectStorage,
-            info: &ObjInfo,
-            key: FileKey,
-        ) -> Result<Vec<u8>, Error> {
+        fn try_key(this: &mut EncryptedObjectStorage, info: &ObjInfo, key: FileKey) -> Result<Vec<u8>, Error> {
             let mut info = info.clone();
-            info.full_path = this.path(&key, &info.full_path, info.id);
+            info.full_path = this.path(&key, &info.full_path, &info.external_id);
 
             let bytes = this.fs.get(&info)?;
-            EncryptedObjectStorage::decrypt(&this.config.encryption_key, &key, &bytes)
+            // Skip the first line, which contains a header with metadata
+            let start = bytes
+                .iter()
+                .find_position(|b| **b == b'\n')
+                .ok_or_else(|| anyhow!("Invalid encrypted file header"))?
+                .0
+                + 1;
+
+            EncryptedObjectStorage::decrypt(&this.config.encryption_key, &key, &bytes[start..])
         }
 
         let mut last_error = None;
@@ -272,13 +260,26 @@ impl ObjectStorage for EncryptedObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
         let (key, bytes) = Self::encrypt(&self.config.encryption_key, &content, &info.sha512)?;
-        let full_path = self.path(&key, &info.full_path, info.id);
+        let full_path = self.path(&key, &info.full_path, &info.external_id);
         let prev_path = info.full_path.clone();
 
         // Hide real path, to avoid leaking information (only has effect if config.path_generator is Path)
         info.full_path = full_path;
         info.encryption_key = Self::add_to_keychain(&info.encryption_key, &self.config.name, &key);
-        self.fs.put(info, &bytes)?;
+
+        let prefix = format!(
+            "$AES256GCM:{}:{}:{}$PBKDF2_HMAC:{}${}$\n",
+            SALT_LEN,
+            NONCE_LEN,
+            AEAD_LEN,
+            PBKDF2_ITERATIONS,
+            key.serialize()
+        );
+        let mut final_bytes = Vec::with_capacity(prefix.bytes().len() + bytes.len());
+        final_bytes.extend_from_slice(prefix.as_bytes());
+        final_bytes.extend_from_slice(bytes.as_slice());
+
+        self.fs.put(info, &final_bytes)?;
         info.full_path = prev_path;
         Ok(())
     }
@@ -294,9 +295,10 @@ impl ObjectStorage for EncryptedObjectStorage {
         ) -> Result<(), Error> {
             let original_info = info.clone();
             let mut info_copy = info.clone();
-            info_copy.full_path = this.path(&key, &info_copy.full_path, info_copy.id);
+            info_copy.full_path = this.path(&key, &info_copy.full_path, &info_copy.external_id);
 
-            this.fs.remove(&info_copy, Rc::new(move |_, pg| is_in_use(&original_info, pg)))
+            this.fs
+                .remove(&info_copy, Rc::new(move |_, pg| is_in_use(&original_info, pg)))
         }
 
         let mut last_error = None;
@@ -322,8 +324,8 @@ impl ObjectStorage for EncryptedObjectStorage {
             new_info: &ObjInfo,
             key: FileKey,
         ) -> Result<(), AnyError> {
-            let prev_path = this.path(&key, &prev_info.full_path, prev_info.id);
-            let new_path = this.path(&key, &new_info.full_path, new_info.id);
+            let prev_path = this.path(&key, &prev_info.full_path, &prev_info.external_id);
+            let new_path = this.path(&key, &new_info.full_path, &new_info.external_id);
 
             if prev_path != new_path {
                 let mut prev_info = prev_info.clone();
@@ -380,15 +382,13 @@ fn test_encryption() {
     let content = "Hello world".as_bytes();
     let content_sha512 = hex::encode(hmac_sha512::Hash::hash(content));
 
-    let (file_key, ciphertext) =
-        EncryptedObjectStorage::encrypt(&password, content, &content_sha512).unwrap();
+    let (file_key, ciphertext) = EncryptedObjectStorage::encrypt(&password, content, &content_sha512).unwrap();
     let serialized_file_key = file_key.serialize();
 
     // Storage and later retrieval
 
     let deserialized_file_key = FileKey::deserialize(&serialized_file_key).unwrap();
-    let plaintext =
-        EncryptedObjectStorage::decrypt(&password, &deserialized_file_key, &ciphertext).unwrap();
+    let plaintext = EncryptedObjectStorage::decrypt(&password, &deserialized_file_key, &ciphertext).unwrap();
 
     println!("Password: {:?}", password);
     println!("Salt: {:?}", hex::encode(file_key.salt));

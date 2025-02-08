@@ -1,4 +1,4 @@
-use crate::fs_tree::{FsTree, FsTreeRef};
+use crate::fs_tree::{FsTree, FsTreeChild, FsTreeKind, FsTreeRef};
 use crate::semver::Semver;
 use crate::{AnyError, VERSION};
 use anyhow::anyhow;
@@ -47,6 +47,7 @@ pub struct DirectoryEntry {
     pub entry_file_id: i64,
     pub name: String,
     pub kind: i64,
+    pub external_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -82,11 +83,10 @@ impl MetadataDB {
         self.connection.execute(include_str!("./sql/sqlar.sql"))?;
 
         // Schema version
-        let version = self.get_row(
-            "SELECT version FROM migrations ORDER BY id DESC LIMIT 1",
-            NO_BINDINGS.as_ref(),
-            |stm| Ok(stm.read::<String, _>("version")?),
-        )?;
+        let version =
+            self.get_row("SELECT version FROM migrations ORDER BY id DESC LIMIT 1", NO_BINDINGS.as_ref(), |stm| {
+                Ok(stm.read::<String, _>("version")?)
+            })?;
 
         let mut version = match version {
             Some(v) => Semver::parse(&v)?,
@@ -226,29 +226,25 @@ impl MetadataDB {
     }
 
     pub fn get_file_by_sha512(&self, sha512: &str) -> Result<Option<FileRow>, AnyError> {
-        self.get_row(
-            "SELECT * FROM files WHERE sha512 = :sha512 LIMIT 1",
-            (":sha512", sha512),
-            |row| {
-                Ok(FileRow {
-                    id: row.read("id")?,
-                    version: row.read("version")?,
-                    kind: row.read("kind")?,
-                    name: row.read("name")?,
-                    external_id: row.read("external_id")?,
-                    uid: row.read("uid")?,
-                    gid: row.read("gid")?,
-                    perms: row.read("perms")?,
-                    size: row.read("size")?,
-                    sha512: row.read("sha512")?,
-                    encryption_key: row.read("encryption_key")?,
-                    compression: row.read("compression")?,
-                    accessed_at: row.read("accessed_at")?,
-                    created_at: row.read("created_at")?,
-                    updated_at: row.read("updated_at")?,
-                })
-            },
-        )
+        self.get_row("SELECT * FROM files WHERE sha512 = :sha512 LIMIT 1", (":sha512", sha512), |row| {
+            Ok(FileRow {
+                id: row.read("id")?,
+                version: row.read("version")?,
+                kind: row.read("kind")?,
+                name: row.read("name")?,
+                external_id: row.read("external_id")?,
+                uid: row.read("uid")?,
+                gid: row.read("gid")?,
+                perms: row.read("perms")?,
+                size: row.read("size")?,
+                sha512: row.read("sha512")?,
+                encryption_key: row.read("encryption_key")?,
+                compression: row.read("compression")?,
+                accessed_at: row.read("accessed_at")?,
+                created_at: row.read("created_at")?,
+                updated_at: row.read("updated_at")?,
+            })
+        })
     }
 
     pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileRow>, AnyError> {
@@ -313,9 +309,7 @@ impl MetadataDB {
     }
 
     pub fn get_file_version(&self, id: i64) -> Result<Option<i64>, AnyError> {
-        self.get_row("SELECT version FROM files WHERE id = :id", (":id", id), |row| {
-            Ok(row.read::<i64, _>("version")?)
-        })
+        self.get_row("SELECT version FROM files WHERE id = :id", (":id", id), |row| Ok(row.read::<i64, _>("version")?))
     }
 
     pub fn register_file_change(&self, file: &FileRow, kind: FileChangeKind) -> Result<(), AnyError> {
@@ -360,6 +354,7 @@ impl MetadataDB {
                     entry_file_id: row.read("entry_file_id")?,
                     name: row.read("name")?,
                     kind: row.read("kind")?,
+                    external_id: row.read("external_id")?,
                 })
             },
         )
@@ -437,6 +432,7 @@ impl MetadataDB {
                     entry_file_id: row.read("entry_file_id")?,
                     name: row.read("name")?,
                     kind: row.read("kind")?,
+                    external_id: row.read("external_id")?,
                 })
             },
         )
@@ -455,6 +451,7 @@ impl MetadataDB {
                 entry_file_id: row.read("entry_file_id")?,
                 name: row.read("name")?,
                 kind: row.read("kind")?,
+                external_id: row.read("external_id")?,
             })
         })
     }
@@ -486,10 +483,7 @@ impl MetadataDB {
         )?;
         let id = self.get_last_inserted_row_id()?;
 
-        self.execute1(
-            "UPDATE files SET version = version + 1 WHERE id = :id",
-            (":id", entry.directory_file_id),
-        )?;
+        self.execute1("UPDATE files SET version = version + 1 WHERE id = :id", (":id", entry.directory_file_id))?;
 
         Ok(id)
     }
@@ -520,6 +514,7 @@ impl MetadataDB {
                     entry_file_id: row.read("entry_file_id")?,
                     name: row.read("name")?,
                     kind: row.read("kind")?,
+                    external_id: row.read("external_id")?,
                 })
             })?;
 
@@ -562,7 +557,12 @@ impl MetadataDB {
 
                 {
                     let node = by_id.get_mut(&node_id).unwrap();
-                    node.borrow_mut().children.push(new_node);
+                    node.borrow_mut().children.push(FsTreeChild {
+                        name: c.name.clone(),
+                        external_id: c.external_id.clone(),
+                        kind: FsTreeKind::from_i64(c.kind),
+                        file: new_node,
+                    });
                 }
             }
         }
@@ -571,12 +571,105 @@ impl MetadataDB {
         Ok(root)
     }
 
+    pub fn import_tree(&self, tree: FsTreeRef) -> Result<(), AnyError> {
+        let mut files = vec![];
+        let mut dir_entries = vec![];
+
+        fn collect(tree: &FsTreeRef, files: &mut Vec<FileRow>, dir_entries: &mut Vec<DirectoryEntry>) {
+            let node = tree.borrow();
+
+            files.push(FileRow {
+                id: node.id,
+                version: node.version,
+                kind: node.kind.to_file_kind(),
+                name: node.name.clone(),
+                external_id: node.external_id.to_string(),
+                uid: node.uid,
+                gid: node.gid,
+                perms: node.perms,
+                size: node.size,
+                sha512: node.sha512.clone(),
+                encryption_key: node.encryption_key.clone(),
+                compression: node.compression.clone(),
+                accessed_at: node.accessed_at,
+                created_at: node.created_at,
+                updated_at: node.updated_at,
+            });
+
+            for child_tree in &node.children {
+                {
+                    let child = child_tree.file.borrow();
+                    dir_entries.push(DirectoryEntry {
+                        id: 0,
+                        directory_file_id: node.id,
+                        entry_file_id: child.id,
+                        name: child.name.clone(),
+                        kind: child.kind.to_file_kind(),
+                        external_id: child_tree.external_id.to_string(),
+                    });
+                };
+                collect(&child_tree.file, files, dir_entries);
+            }
+        }
+
+        collect(&tree, &mut files, &mut dir_entries);
+
+        let mut file_id_map: HashMap<i64, i64> = HashMap::new();
+
+        for file in &mut files {
+            let prev_id = file.id;
+
+            self.execute14(
+                "INSERT INTO files (version, kind, name, external_id, uid, gid, perms, size, sha512, encryption_key, compression, accessed_at, created_at, updated_at) \
+                VALUES (:version, :kind, :name, :external_id, :uid, :gid, :perms, :size, :sha512, :encryption_key, :compression, :accessed_at, :created_at, :updated_at)",
+                (":version", 1),
+                (":kind", file.kind),
+                (":name", file.name.as_str()),
+                (":external_id", file.external_id.as_str()),
+                (":uid", file.uid),
+                (":gid", file.gid),
+                (":perms", file.perms),
+                (":size", file.size),
+                (":sha512", file.sha512.as_str()),
+                (":encryption_key", file.encryption_key.as_str()),
+                (":compression", file.compression.as_str()),
+                (":accessed_at", file.accessed_at),
+                (":created_at", file.created_at),
+                (":updated_at", file.updated_at),
+            )?;
+
+            let id = self.get_last_inserted_row_id()?;
+            file.id = id;
+            file_id_map.insert(prev_id, id);
+        }
+
+        for entry in &mut dir_entries {
+            entry.directory_file_id = *file_id_map.get(&entry.directory_file_id).unwrap();
+            entry.entry_file_id = *file_id_map.get(&entry.entry_file_id).unwrap();
+            self.execute4(
+                "INSERT INTO directory_entries (directory_file_id, entry_file_id, name, kind) \
+                VALUES (:directory_file_id, :entry_file_id, :name, :kind)",
+                (":directory_file_id", entry.directory_file_id),
+                (":entry_file_id", entry.entry_file_id),
+                (":name", entry.name.as_str()),
+                (":kind", entry.kind),
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub fn nuke(&self) -> Result<(), AnyError> {
         self.execute0("DELETE FROM directory_entries")?;
+        self.execute0("DELETE FROM sqlite_sequence WHERE name = 'directory_entries';")?;
         self.execute0("DELETE FROM files")?;
+        self.execute0("DELETE FROM sqlite_sequence WHERE name = 'files';")?;
         self.execute0("DELETE FROM file_changes")?;
+        self.execute0("DELETE FROM sqlite_sequence WHERE name = 'file_changes';")?;
         self.execute0("DELETE FROM migrations")?;
+        self.execute0("DELETE FROM sqlite_sequence WHERE name = 'migrations';")?;
         self.execute0("DELETE FROM persistent_settings")?;
+        self.execute0("DELETE FROM sqlite_sequence WHERE name = 'persistent_settings';")?;
         Ok(())
     }
 

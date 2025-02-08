@@ -1,9 +1,9 @@
+use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
+use crate::AnyError;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use crate::metadata_db::{FileRow, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
-use serde::{Deserialize, Serialize};
-use crate::AnyError;
 
 pub type FsTreeRef = Rc<RefCell<FsTree>>;
 
@@ -24,7 +24,15 @@ pub struct FsTree {
     pub accessed_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
-    pub children: Vec<FsTreeRef>,
+    pub children: Vec<FsTreeChild>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct FsTreeChild {
+    pub name: String,
+    pub external_id: String,
+    pub kind: FsTreeKind,
+    pub file: FsTreeRef,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -33,16 +41,28 @@ pub enum FsTreeKind {
     Directory,
 }
 
+impl FsTreeKind {
+    pub fn to_file_kind(&self) -> i64 {
+        match self {
+            FsTreeKind::File => FILE_KIND_REGULAR,
+            FsTreeKind::Directory => FILE_KIND_DIRECTORY,
+        }
+    }
+    pub fn from_i64(value: i64) -> FsTreeKind {
+        match value {
+            FILE_KIND_REGULAR => FsTreeKind::File,
+            FILE_KIND_DIRECTORY => FsTreeKind::Directory,
+            _ => panic!("Invalid kind"),
+        }
+    }
+}
+
 impl<'a> From<FileRow> for FsTree {
     fn from(value: FileRow) -> FsTree {
         FsTree {
             id: value.id,
             version: value.version,
-            kind: match value.kind {
-                FILE_KIND_REGULAR => FsTreeKind::File,
-                FILE_KIND_DIRECTORY => FsTreeKind::Directory,
-                _ => panic!("Invalid kind"),
-            },
+            kind: FsTreeKind::from_i64(value.kind),
             name: value.name,
             external_id: value.external_id,
             uid: value.uid,
@@ -71,12 +91,12 @@ impl FsTree {
             let (node_ref, sub_path) = queue.pop().unwrap();
             let dir_node = node_ref.borrow();
 
-            for child_ref in &dir_node.children {
-                let child = child_ref.borrow();
+            for child_tree in &dir_node.children {
+                let child = child_tree.file.borrow();
                 let child_path = sub_path.join(&child.name);
 
                 if child.kind == FsTreeKind::Directory {
-                    queue.push((child_ref.clone(), child_path.clone()));
+                    queue.push((child_tree.file.clone(), child_path.clone()));
                 }
 
                 func(&child, child_path)?;
