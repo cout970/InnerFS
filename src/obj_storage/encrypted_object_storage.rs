@@ -14,7 +14,6 @@ use anyhow::{anyhow, Error};
 use itertools::Itertools;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
-use std::rc::Rc;
 use std::sync::Arc;
 
 const AES_KEY_LEN: usize = 32;
@@ -290,7 +289,7 @@ impl ObjectStorage for EncryptedObjectStorage {
         info_copy.full_path = self.path(&info_copy.full_path, &info_copy.external_id);
 
         self.fs
-            .remove(&info_copy, Rc::new(move |_, pg| is_in_use(&original_info, pg)))?;
+            .remove(&info_copy, Arc::new(move |_, pg| is_in_use(&original_info, pg)))?;
 
         Ok(())
     }

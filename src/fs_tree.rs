@@ -3,9 +3,9 @@ use crate::AnyError;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
-pub type FsTreeRef = Rc<RefCell<FsTree>>;
+pub type FsTreeRef = Arc<RefCell<FsTree>>;
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct FsTree {

@@ -11,7 +11,6 @@ use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 
 // Storage backends
@@ -67,7 +66,7 @@ impl PathGenerator {
     }
 }
 
-pub trait ObjectStorage {
+pub trait ObjectStorage : Send + Sync {
     fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError>;
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError>;
     fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError>;
@@ -102,7 +101,7 @@ impl ObjInfo {
     }
 }
 
-pub fn create_object_storage(config: Arc<StorageConfig>, sql: Rc<MetadataDB>) -> Box<dyn ObjectStorage> {
+pub fn create_object_storage(config: Arc<StorageConfig>, sql: &MetadataDB) -> Box<dyn ObjectStorage> {
     let mut obj_storage: Box<dyn ObjectStorage> = match &config.storage_backend {
         StorageOption::FileSystem => Box::new(FsObjectStorage {
             base_path: PathBuf::from(&config.blob_storage),

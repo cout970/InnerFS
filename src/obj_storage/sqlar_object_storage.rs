@@ -4,12 +4,11 @@ use crate::obj_storage::{ObjInfo, ObjectStorage};
 use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
-use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct SqlarObjectStorage {
-    pub sql: Rc<MetadataDB>,
+    pub sql: MetadataDB,
     pub config: Arc<StorageConfig>,
 }
 

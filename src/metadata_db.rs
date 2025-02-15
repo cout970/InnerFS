@@ -8,10 +8,11 @@ use sqlite::{Bindable, State, Statement};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
+#[derive(Clone)]
 pub struct MetadataDB {
-    pub connection: sqlite::Connection,
+    pub connection: Arc<Mutex<sqlite::Connection>>,
     pub database_file: String,
 }
 
@@ -58,29 +59,54 @@ pub enum FileChangeKind {
     Deleted,
 }
 
+#[derive(Debug, Clone)]
+pub struct FileChange {
+    pub id: i64,
+    pub file_id: i64,
+    pub file_external_id: String,
+    pub file_version: i64,
+    pub kind: i64,
+    pub file_hash: String,
+    pub changed_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalFileChange {
+    pub id: i64,
+    pub kind: i64,
+    pub changed_at: i64,
+    pub file_external_id: String,
+    pub file_version: i64,
+    pub file_hash: String,
+    pub status: u32, // 0 = pending, 1 = success, 2 = failed
+    pub retries: u32,
+    pub imported_at: i64,
+}
+
 #[allow(dead_code)]
 impl MetadataDB {
     pub fn open(database_file: &str) -> MetadataDB {
         let connection = sqlite::open(database_file).expect("Unable to open database");
 
         MetadataDB {
-            connection,
+            connection: Arc::new(Mutex::new(connection)),
             database_file: database_file.to_string(),
         }
     }
 
-    pub fn clone(&self) -> Self {
+    pub fn new_connection(&self) -> Self {
         MetadataDB::open(&self.database_file)
     }
 
     pub fn run_migrations(&self) -> Result<(), AnyError> {
-        self.connection.execute(include_str!("./sql/init.sql"))?;
-        self.connection.execute(include_str!("./sql/migrations.sql"))?;
-        self.connection.execute(include_str!("./sql/persistent_settings.sql"))?;
-        self.connection.execute(include_str!("./sql/files.sql"))?;
-        self.connection.execute(include_str!("./sql/directory_entries.sql"))?;
-        self.connection.execute(include_str!("./sql/file_changes.sql"))?;
-        self.connection.execute(include_str!("./sql/sqlar.sql"))?;
+        self.execute0(include_str!("./sql/init.sql"))?;
+        self.execute0(include_str!("./sql/migrations.sql"))?;
+        self.execute0(include_str!("./sql/persistent_settings.sql"))?;
+        self.execute0(include_str!("./sql/files.sql"))?;
+        self.execute0(include_str!("./sql/directory_entries.sql"))?;
+        self.execute0(include_str!("./sql/file_changes.sql"))?;
+        self.execute0(include_str!("./sql/sqlar.sql"))?;
+        self.execute0(include_str!("./sql/external_file_changes.sql"))?;
 
         // Schema version
         let version =
@@ -92,8 +118,6 @@ impl MetadataDB {
             Some(v) => Semver::parse(&v)?,
             None => {
                 // Initial setup from empty database
-                info!("Initializing database for first time");
-                self.connection.execute(include_str!("./sql/create_root_file.sql"))?;
                 self.execute1(
                     "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
                     (":version", VERSION),
@@ -105,18 +129,10 @@ impl MetadataDB {
         if version < Semver::new(1, 0, 2) {
             info!("Running migration from version: '1.0.1' to '1.0.2'");
             // New version column, or ignore error if it already exists
-            let _ = self
-                .connection
-                .execute("ALTER TABLE files ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
-            let _ = self
-                .connection
-                .execute("ALTER TABLE files ADD COLUMN compression TEXT NOT NULL DEFAULT ''");
-            let _ = self
-                .connection
-                .execute("ALTER TABLE file_changes RENAME COLUMN file_sha512 file_hash TEXT NOT NULL");
-            let _ = self
-                .connection
-                .execute("ALTER TABLE directory_entry RENAME TO directory_entries");
+            let _ = self.execute0("ALTER TABLE files ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+            let _ = self.execute0("ALTER TABLE files ADD COLUMN compression TEXT NOT NULL DEFAULT ''");
+            let _ = self.execute0("ALTER TABLE file_changes RENAME COLUMN file_sha512 file_hash TEXT NOT NULL");
+            let _ = self.execute0("ALTER TABLE directory_entry RENAME TO directory_entries");
             version = Semver::new(1, 0, 2);
             self.execute1(
                 "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
@@ -125,12 +141,62 @@ impl MetadataDB {
         }
 
         if version < Semver::new(1, 1, 0) {
-            self.connection
-                .execute(include_str!("./sql/migration_external_ids.sql"))?;
+            self.execute0(include_str!("./sql/migration_external_ids.sql"))?;
             version = Semver::new(1, 1, 0);
             self.execute1(
                 "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
                 (":version", VERSION),
+            )?;
+        }
+
+        if version < Semver::new(1, 2, 0) {
+            let _ = self.execute0("alter table main.file_changes add column file_external_id text not null default ''");
+
+            version = Semver::new(1, 2, 0);
+            self.execute1(
+                "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
+                (":version", VERSION),
+            )?;
+        }
+
+        // Root directory
+        if self
+            .get_row("SELECT id FROM files WHERE id = :id", (":id", ROOT_DIRECTORY_ID), |_| Ok(()))?
+            .is_none()
+        {
+            self.execute0(
+                "INSERT INTO files \
+                      (id, kind, name, uid,  gid,  perms, size, sha512, encryption_key, compression, accessed_at,      created_at,       updated_at) \
+               VALUES (1,  1,    '/',  1000, 1000, 493,   0,    '',     '',             '',          unixepoch('now'), unixepoch('now'), unixepoch('now'))"
+            )?;
+        }
+        // Root directory self pointers
+        if self
+            .get_row(
+                "SELECT id FROM directory_entries WHERE directory_file_id = :id AND name = '.'",
+                (":id", ROOT_DIRECTORY_ID),
+                |_| Ok(()),
+            )?
+            .is_none()
+        {
+            self.execute0(
+                "INSERT INTO directory_entries \
+                      (directory_file_id, entry_file_id, name, kind) \
+               VALUES (1,                 1,             '.',  1)",
+            )?;
+        }
+        if self
+            .get_row(
+                "SELECT id FROM directory_entries WHERE directory_file_id = :id AND name = '..'",
+                (":id", ROOT_DIRECTORY_ID),
+                |_| Ok(()),
+            )?
+            .is_none()
+        {
+            self.execute0(
+                "INSERT INTO directory_entries \
+                      (directory_file_id, entry_file_id, name, kind) \
+               VALUES (1,                 1,             '..',  1)",
             )?;
         }
 
@@ -177,26 +243,32 @@ impl MetadataDB {
         Ok(id)
     }
 
+    pub fn add_external_file(&self, file: &FileRow) -> Result<i64, AnyError> {
+        self.execute14(
+            "INSERT INTO files (version, kind, name, external_id, uid, gid, perms, size, sha512, encryption_key, compression, accessed_at, created_at, updated_at) \
+            VALUES (:version, :kind, :name, :external_id, :uid, :gid, :perms, :size, :sha512, :encryption_key, :compression, :accessed_at, :created_at, :updated_at)",
+            (":version", file.version),
+            (":kind", file.kind),
+            (":name", file.name.as_str()),
+            (":external_id", file.external_id.as_str()),
+            (":uid", file.uid),
+            (":gid", file.gid),
+            (":perms", file.perms),
+            (":size", file.size),
+            (":sha512", file.sha512.as_str()),
+            (":encryption_key", file.encryption_key.as_str()),
+            (":compression", file.compression.as_str()),
+            (":accessed_at", file.accessed_at),
+            (":created_at", file.created_at),
+            (":updated_at", file.updated_at),
+        )?;
+
+        let id = self.get_last_inserted_row_id()?;
+        Ok(id)
+    }
+
     pub fn get_file(&self, id: i64) -> Result<Option<FileRow>, AnyError> {
-        self.get_row("SELECT * FROM files WHERE id = :id", (":id", id), |row| {
-            Ok(FileRow {
-                id: row.read("id")?,
-                version: row.read("version")?,
-                kind: row.read("kind")?,
-                name: row.read("name")?,
-                external_id: row.read("external_id")?,
-                uid: row.read("uid")?,
-                gid: row.read("gid")?,
-                perms: row.read("perms")?,
-                size: row.read("size")?,
-                sha512: row.read("sha512")?,
-                encryption_key: row.read("encryption_key")?,
-                compression: row.read("compression")?,
-                accessed_at: row.read("accessed_at")?,
-                created_at: row.read("created_at")?,
-                updated_at: row.read("updated_at")?,
-            })
-        })
+        self.get_row("SELECT * FROM files WHERE id = :id", (":id", id), Self::file_row_from_statement)
     }
 
     pub fn get_files(&self, ids: &[i64]) -> Result<Vec<FileRow>, AnyError> {
@@ -204,46 +276,42 @@ impl MetadataDB {
             return Ok(vec![]);
         }
         let filter = ids.iter().map(|_i| "?").join(",");
-        self.get_rows(&format!("SELECT * FROM files WHERE id in ({})", filter), ids, |row| {
-            Ok(FileRow {
-                id: row.read("id")?,
-                version: row.read("version")?,
-                kind: row.read("kind")?,
-                name: row.read("name")?,
-                external_id: row.read("external_id")?,
-                uid: row.read("uid")?,
-                gid: row.read("gid")?,
-                perms: row.read("perms")?,
-                size: row.read("size")?,
-                sha512: row.read("sha512")?,
-                encryption_key: row.read("encryption_key")?,
-                compression: row.read("compression")?,
-                accessed_at: row.read("accessed_at")?,
-                created_at: row.read("created_at")?,
-                updated_at: row.read("updated_at")?,
-            })
-        })
+        self.get_rows(&format!("SELECT * FROM files WHERE id in ({})", filter), ids, Self::file_row_from_statement)
     }
 
     pub fn get_file_by_sha512(&self, sha512: &str) -> Result<Option<FileRow>, AnyError> {
-        self.get_row("SELECT * FROM files WHERE sha512 = :sha512 LIMIT 1", (":sha512", sha512), |row| {
-            Ok(FileRow {
-                id: row.read("id")?,
-                version: row.read("version")?,
-                kind: row.read("kind")?,
-                name: row.read("name")?,
-                external_id: row.read("external_id")?,
-                uid: row.read("uid")?,
-                gid: row.read("gid")?,
-                perms: row.read("perms")?,
-                size: row.read("size")?,
-                sha512: row.read("sha512")?,
-                encryption_key: row.read("encryption_key")?,
-                compression: row.read("compression")?,
-                accessed_at: row.read("accessed_at")?,
-                created_at: row.read("created_at")?,
-                updated_at: row.read("updated_at")?,
-            })
+        self.get_row(
+            "SELECT * FROM files WHERE sha512 = :sha512 LIMIT 1",
+            (":sha512", sha512),
+            Self::file_row_from_statement,
+        )
+    }
+
+    pub fn get_file_by_external_id(&self, external_id: &str) -> Result<Option<FileRow>, AnyError> {
+        self.get_row(
+            "SELECT * FROM files WHERE external_id = :external_id LIMIT 1",
+            (":external_id", external_id),
+            Self::file_row_from_statement,
+        )
+    }
+
+    fn file_row_from_statement(row: &Statement) -> Result<FileRow, AnyError> {
+        Ok(FileRow {
+            id: row.read("id")?,
+            version: row.read("version")?,
+            kind: row.read("kind")?,
+            name: row.read("name")?,
+            external_id: row.read("external_id")?,
+            uid: row.read("uid")?,
+            gid: row.read("gid")?,
+            perms: row.read("perms")?,
+            size: row.read("size")?,
+            sha512: row.read("sha512")?,
+            encryption_key: row.read("encryption_key")?,
+            compression: row.read("compression")?,
+            accessed_at: row.read("accessed_at")?,
+            created_at: row.read("created_at")?,
+            updated_at: row.read("updated_at")?,
         })
     }
 
@@ -308,20 +376,65 @@ impl MetadataDB {
         Ok(())
     }
 
+    pub fn update_external_file(&self, file: &FileRow) -> Result<(), AnyError> {
+        self.execute14(
+            "UPDATE files SET version = version + 1, \
+            kind = :kind, name = :name, external_id = :external_id, uid = :uid, gid = :gid, perms = :perms, size = :size, \
+            sha512 = :sha512, encryption_key = :encryption_key, compression = :compression, \
+            accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at \
+            WHERE id = :id",
+            (":kind", file.kind),
+            (":name", file.name.as_str()),
+            (":external_id", file.external_id.as_str()),
+            (":uid", file.uid),
+            (":gid", file.gid),
+            (":perms", file.perms),
+            (":size", file.size),
+            (":sha512", file.sha512.as_str()),
+            (":encryption_key", file.encryption_key.as_str()),
+            (":compression", file.compression.as_str()),
+            (":accessed_at", file.accessed_at),
+            (":created_at", file.created_at),
+            (":updated_at", file.updated_at),
+            (":id", file.id),
+        )?;
+        Ok(())
+    }
+
     pub fn get_file_version(&self, id: i64) -> Result<Option<i64>, AnyError> {
         self.get_row("SELECT version FROM files WHERE id = :id", (":id", id), |row| Ok(row.read::<i64, _>("version")?))
     }
 
+    pub fn get_file_external_id(&self, id: i64) -> Result<Option<String>, AnyError> {
+        self.get_row("SELECT external_id FROM files WHERE id = :id", (":id", id), |row| {
+            Ok(row.read::<String, _>("external_id")?)
+        })
+    }
+
     pub fn register_file_change(&self, file: &FileRow, kind: FileChangeKind) -> Result<(), AnyError> {
         let version = self.get_file_version(file.id)?.unwrap_or_else(|| 1);
+        let external_id = self.get_file_external_id(file.id)?.unwrap_or_else(|| "".to_string());
         let sha512 = file.hash();
 
-        self.execute4(
-            "INSERT INTO file_changes (file_id, file_version, kind, file_hash, changed_at) values (:file_id, :file_version, :kind, :file_hash, unixepoch('now'))",
+        self.execute5(
+            "INSERT INTO file_changes (file_id, file_external_id, file_version, kind, file_hash, changed_at) values (:file_id, :file_external_id, :file_version, :kind, :file_hash, unixepoch('now'))",
             (":file_id", file.id),
+            (":file_external_id", external_id.as_str()),
             (":file_version", version),
             (":kind", kind.to_i64()),
             (":file_hash", sha512[..16].to_string().as_str()),
+        )?;
+        Ok(())
+    }
+
+    pub fn register_file_deletion(&self, id: i64, external_id: &str) -> Result<(), AnyError> {
+        self.execute5(
+            "INSERT INTO file_changes (file_id, file_external_id, file_version, kind, file_hash, changed_at) values (:file_id, :file_external_id, :file_version, :kind, :file_hash, unixepoch('now'))",
+            (":file_id", id),
+            (":file_external_id", external_id),
+            (":file_version", 0),
+            (":kind", FileChangeKind::Deleted.to_i64()),
+            (":file_hash", ""),
         )?;
         Ok(())
     }
@@ -403,6 +516,14 @@ impl MetadataDB {
         Ok(path)
     }
 
+    pub fn get_file_id_by_external_id(&self, external_id: &str) -> Result<Option<i64>, AnyError> {
+        self.get_row(
+            "SELECT id FROM files WHERE external_id = :external_id",
+            &[(":external_id", external_id)][..],
+            |row| Ok(row.read::<i64, _>("id")?),
+        )
+    }
+
     /// Get a sublist of the directory entries for a given directory file id
     /// The offset starts at 1
     pub fn get_directory_entries_limit(
@@ -472,6 +593,19 @@ impl MetadataDB {
         Ok(())
     }
 
+    pub fn update_external_directory_entry(&self, entry: &DirectoryEntry) -> Result<(), AnyError> {
+        self.execute6(
+            "UPDATE directory_entries SET directory_file_id = :directory_file_id, entry_file_id = :entry_file_id, name = :name, kind = :kind, external_id = :external_id WHERE id = :id",
+            (":directory_file_id", entry.directory_file_id),
+            (":entry_file_id", entry.entry_file_id),
+            (":name", entry.name.as_str()),
+            (":kind", entry.kind),
+            (":id", entry.id),
+            (":external_id", entry.external_id.as_str()),
+        )?;
+        Ok(())
+    }
+
     pub fn add_directory_entry(&self, entry: &DirectoryEntry) -> Result<i64, AnyError> {
         self.execute4(
             "INSERT INTO directory_entries (directory_file_id, entry_file_id, name, kind) \
@@ -488,8 +622,23 @@ impl MetadataDB {
         Ok(id)
     }
 
+    pub fn add_external_directory_entry(&self, entry: &DirectoryEntry) -> Result<i64, AnyError> {
+        self.execute5(
+            "INSERT INTO directory_entries (directory_file_id, entry_file_id, name, kind, external_id) \
+            VALUES (:directory_file_id, :entry_file_id, :name, :kind, :external_id)",
+            (":directory_file_id", entry.directory_file_id),
+            (":entry_file_id", entry.entry_file_id),
+            (":name", entry.name.as_str()),
+            (":kind", entry.kind),
+            (":external_id", entry.external_id.as_str()),
+        )?;
+        let id = self.get_last_inserted_row_id()?;
+        Ok(id)
+    }
+
     pub fn get_last_inserted_row_id(&self) -> Result<i64, AnyError> {
-        let mut stm2 = self.connection.prepare("SELECT last_insert_rowid()")?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut stm2 = connection.prepare("SELECT last_insert_rowid()")?;
         stm2.next()?;
         let id: i64 = stm2.read::<i64, _>(0)?;
         Ok(id)
@@ -500,6 +649,83 @@ impl MetadataDB {
             "UPDATE files SET accessed_at = :accessed_at WHERE id = :id",
             (":accessed_at", accessed_at),
             (":id", id),
+        )?;
+        Ok(())
+    }
+
+    pub fn get_file_changes(&self, since: i64, limit: i64) -> Result<Vec<FileChange>, AnyError> {
+        let query = "\
+            SELECT * \
+            FROM file_changes \
+            WHERE id > :since \
+            ORDER BY changed_at \
+            LIMIT :limit";
+
+        self.get_rows(query, &[(":since", since), (":limit", limit)][..], |row| {
+            Ok(FileChange {
+                id: row.read("id")?,
+                file_id: row.read("file_id")?,
+                file_external_id: row.read("file_external_id")?,
+                file_version: row.read("file_version")?,
+                kind: row.read("kind")?,
+                file_hash: row.read("file_hash")?,
+                changed_at: row.read("changed_at")?,
+            })
+        })
+    }
+
+    pub fn add_external_file_change(&self, change: ExternalFileChange) -> Result<(), AnyError> {
+        self.execute8(
+            "INSERT INTO external_file_changes (id, kind, changed_at, file_external_id, file_version, file_hash, status, retries, imported_at) \
+            VALUES (:id, :kind, :changed_at, :file_external_id, :file_version, :file_hash, :status, :retries, unixepoch('now'))",
+            (":id", change.id),
+            (":kind", change.kind),
+            (":changed_at", change.changed_at),
+            (":file_external_id", change.file_external_id.as_str()),
+            (":file_version", change.file_version),
+            (":file_hash", change.file_hash.as_str()),
+            (":status", change.status as i64),
+            (":retries", change.retries as i64),
+        )?;
+        Ok(())
+    }
+
+    pub fn get_pending_external_changes(&self, limit: i64) -> Result<Vec<ExternalFileChange>, AnyError>{
+        let rows = self.get_rows(
+            "SELECT * FROM external_file_changes WHERE status = 0 ORDER BY changed_at LIMIT :limit",
+            (":limit", limit),
+            |row| {
+                Ok(ExternalFileChange {
+                    id: row.read("id")?,
+                    kind: row.read("kind")?,
+                    changed_at: row.read("changed_at")?,
+                    file_external_id: row.read("file_external_id")?,
+                    file_version: row.read("file_version")?,
+                    file_hash: row.read("file_hash")?,
+                    status: row.read::<i64, _>("status")? as u32,
+                    retries: row.read::<i64, _>("retries")? as u32,
+                    imported_at: row.read("imported_at")?,
+                })
+            }
+        )?;
+        Ok(rows)
+    }
+
+    pub fn get_last_external_change_id(&self) -> Result<i64, AnyError> {
+        let id =
+            self.get_row("SELECT id FROM external_file_changes ORDER BY id DESC LIMIT 1", NO_BINDINGS.as_ref(), |row| {
+                Ok(row.read::<i64, _>("id")?)
+            })?;
+
+        Ok(id.unwrap_or(0i64))
+    }
+
+    pub fn update_external_file_change(&self, change: ExternalFileChange) -> Result<(), AnyError> {
+        self.execute3(
+            "UPDATE external_file_changes SET status = :status, retries = :retries, imported_at = unixepoch('now') WHERE id = :id",
+            (":status", change.status as i64),
+            (":retries", change.retries as i64),
+            (":id", change.id),
         )?;
         Ok(())
     }
@@ -537,11 +763,11 @@ impl MetadataDB {
 
         let root: FsTree = self.get_file(ROOT_DIRECTORY_ID)?.unwrap().into();
 
-        let mut by_id: HashMap<i64, Rc<RefCell<FsTree>>> = HashMap::new();
+        let mut by_id: HashMap<i64, Arc<RefCell<FsTree>>> = HashMap::new();
         let mut queue = vec![];
 
         queue.push(root.id);
-        by_id.insert(root.id, Rc::new(RefCell::new(root)));
+        by_id.insert(root.id, Arc::new(RefCell::new(root)));
 
         while !queue.is_empty() {
             let node_id = queue.pop().unwrap();
@@ -551,7 +777,7 @@ impl MetadataDB {
                 let file = self.get_file(c.entry_file_id)?.unwrap();
                 let new_node: FsTree = file.into();
                 let new_node_id = new_node.id;
-                let new_node = Rc::new(RefCell::new(new_node));
+                let new_node = Arc::new(RefCell::new(new_node));
 
                 by_id.insert(new_node_id, new_node.clone());
 
@@ -673,7 +899,7 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn get_row<'l, 'q, T, M, R>(
+    pub fn get_row<'q, T, M, R>(
         self: &'q MetadataDB,
         query: &str,
         bindings: T,
@@ -681,10 +907,10 @@ impl MetadataDB {
     ) -> Result<Option<R>, AnyError>
     where
         T: Bindable + Clone,
-        M: FnOnce(&Statement<'l>) -> Result<R, AnyError>,
-        'q: 'l,
+        M: for<'l> FnOnce(&Statement<'l>) -> Result<R, AnyError>,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(bindings)?;
 
         if let State::Row = statement.next()? {
@@ -694,31 +920,26 @@ impl MetadataDB {
         Ok(None)
     }
 
-    pub fn get_rows<'l, 'q, T, M, R>(
-        self: &'q MetadataDB,
-        query: &str,
-        bindings: T,
-        mapper: M,
-    ) -> Result<Vec<R>, AnyError>
+    pub fn get_rows<'q, T, M, R>(self: &'q MetadataDB, query: &str, bindings: T, mapper: M) -> Result<Vec<R>, AnyError>
     where
         T: Bindable + Clone,
-        M: Fn(&Statement<'l>) -> Result<R, AnyError>,
-        'q: 'l,
+        M: for<'l> Fn(&Statement<'l>) -> Result<R, AnyError>,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(bindings)?;
         let mut result = vec![];
 
         while let State::Row = statement.next()? {
             result.push(mapper(&statement)?);
         }
-
         Ok(result)
     }
 
     pub fn execute0(&self, query: &str) -> Result<(), AnyError> {
-        let mut statement = self.connection.prepare(query)?;
-        statement.next()?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
+        while statement.next()? != State::Done {}
         Ok(())
     }
 
@@ -726,7 +947,8 @@ impl MetadataDB {
     where
         B0: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.next()?;
         Ok(())
@@ -737,7 +959,8 @@ impl MetadataDB {
         B0: Bindable + Clone,
         B1: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.next()?;
@@ -750,7 +973,8 @@ impl MetadataDB {
         B1: Bindable + Clone,
         B2: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -765,7 +989,8 @@ impl MetadataDB {
         B2: Bindable + Clone,
         B3: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -790,7 +1015,8 @@ impl MetadataDB {
         B3: Bindable + Clone,
         B4: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -818,7 +1044,8 @@ impl MetadataDB {
         B4: Bindable + Clone,
         B5: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -849,7 +1076,8 @@ impl MetadataDB {
         B5: Bindable + Clone,
         B6: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -883,7 +1111,8 @@ impl MetadataDB {
         B6: Bindable + Clone,
         B7: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -920,7 +1149,8 @@ impl MetadataDB {
         B7: Bindable + Clone,
         B8: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -960,7 +1190,8 @@ impl MetadataDB {
         B8: Bindable + Clone,
         B9: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1003,7 +1234,8 @@ impl MetadataDB {
         B9: Bindable + Clone,
         B10: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1049,7 +1281,8 @@ impl MetadataDB {
         B10: Bindable + Clone,
         B11: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1098,7 +1331,8 @@ impl MetadataDB {
         B11: Bindable + Clone,
         B12: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1150,7 +1384,8 @@ impl MetadataDB {
         B12: Bindable + Clone,
         B13: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1205,7 +1440,8 @@ impl MetadataDB {
         B13: Bindable + Clone,
         B14: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1263,7 +1499,8 @@ impl MetadataDB {
         B14: Bindable + Clone,
         B15: Bindable + Clone,
     {
-        let mut statement = self.connection.prepare(query)?;
+        let connection = self.connection.lock().expect("Unable to lock connection");
+        let mut statement = connection.prepare(query)?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1282,17 +1519,6 @@ impl MetadataDB {
         statement.bind(b15)?;
         statement.next()?;
         Ok(())
-    }
-
-    pub fn transaction<R>(&self, func: impl FnOnce() -> Result<R, AnyError>) -> Result<R, AnyError> {
-        self.connection.execute("BEGIN TRANSACTION")?;
-        let res = func();
-        if res.is_ok() {
-            self.connection.execute("COMMIT")?;
-        } else {
-            self.connection.execute("ROLLBACK")?;
-        }
-        res
     }
 }
 

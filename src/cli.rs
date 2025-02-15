@@ -67,6 +67,18 @@ pub enum Commands {
         #[arg(short, long, value_name = "FILE")]
         path: PathBuf,
     },
+    /// Start a sync server, where clients can connect to keep an updated copy of the filesystem
+    SyncServe {
+        /// If set, the server will listen on this address and port, will fall back to the config file, default value: 127.0.0.1:45684
+        #[arg(short, long, value_name = "ADDRESS")]
+        address: Option<String>,
+    },
+    /// Connect to a sync server to retrieve the filesystem updates
+    SyncConnect {
+        /// Address to connect to, will fall back to the config file
+        #[arg(short, long, value_name = "ADDRESS")]
+        address: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

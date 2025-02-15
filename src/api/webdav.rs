@@ -14,7 +14,7 @@ use url::Url;
 use xml_dom::level2::convert::as_element;
 use xml_dom::level2::{get_implementation, Document, Element, Node, RefNode};
 
-pub fn handle_request(mut request: Request, fs: &mut InnerFileSystem) -> Result<(), AnyError> {
+pub fn webdav_handle_request(mut request: Request, fs: &mut InnerFileSystem) -> Result<(), AnyError> {
     let start = Instant::now();
     let method = request.method().as_str();
     info!("IN : {} {}", method, request.url());

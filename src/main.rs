@@ -11,7 +11,6 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::{env, fs, thread};
 
@@ -27,7 +26,7 @@ mod inner_file_system;
 mod storage_interface;
 mod utils;
 
-use crate::api::start_webdav_server;
+use crate::api::{connect_to_sync_server, start_sync_server, start_webdav_server};
 use crate::cli::{Cli, Commands, FileExportFormat, IndexExportFormat};
 use crate::fs_tree::{FsTree, FsTreeKind};
 use crate::obj_storage::replicated_object_storage::ReplicatedObjectStorage;
@@ -114,7 +113,7 @@ fn start_cli() {
     };
 
     if !is_nuke {
-        check_config(fs.config.clone(), fs.sql.clone())
+        check_config(fs.config.clone(), &fs.sql)
     }
 
     let cmd = cli.command.unwrap_or_else(|| Commands::Mount);
@@ -129,15 +128,17 @@ fn start_cli() {
         Commands::Verify => verify(fs).unwrap(),
         Commands::Webdav { address } => start_webdav_server(fs, address).unwrap(),
         Commands::ImportIndex { format, path } => import_index(format, path).unwrap(),
+        Commands::SyncServe { address } => start_sync_server(fs, address).unwrap(),
+        Commands::SyncConnect { address } => connect_to_sync_server(fs, address).unwrap(),
     }
 }
 
 fn init_fs(config: Arc<Config>) -> InnerFileSystem {
-    let sql = Rc::new(MetadataDB::open(&config.database_file));
+    let sql = MetadataDB::open(&config.database_file);
     sql.run_migrations().expect("Unable to run migrations");
 
     // Select the appropriate storage backend
-    let mut obj_storage: Box<dyn ObjectStorage> = create_object_storage(config.primary.clone(), sql.clone());
+    let mut obj_storage: Box<dyn ObjectStorage> = create_object_storage(config.primary.clone(), &sql);
 
     // Add replicas
     if !config.replicas.is_empty() {
@@ -147,7 +148,7 @@ fn init_fs(config: Arc<Config>) -> InnerFileSystem {
         };
 
         for replica in &config.replicas {
-            rep.replicas.push(create_object_storage(replica.clone(), sql.clone()));
+            rep.replicas.push(create_object_storage(replica.clone(), &sql));
         }
 
         obj_storage = Box::new(rep);
@@ -156,16 +157,16 @@ fn init_fs(config: Arc<Config>) -> InnerFileSystem {
     // Wrap the storage backend in a StorageInterface, which provides a higher-level API
     let storage = StorageInterface::new(obj_storage);
 
-    InnerFileSystem::new(sql.clone(), config, storage)
+    InnerFileSystem::new(sql, config, storage)
 }
 
-fn check_config(config: Arc<Config>, sql: Rc<MetadataDB>) {
+fn check_config(config: Arc<Config>, sql: &MetadataDB) {
     // Check if the config file has changed in incompatible ways (except for the nuke command)
-    check_config_changes("primary", config.primary.clone(), sql.clone()).unwrap();
+    check_config_changes("primary", config.primary.clone(), &sql).unwrap();
 
     if !config.replicas.is_empty() {
         for (index, replica) in config.replicas.iter().enumerate() {
-            check_config_changes(&format!("replica_{}", index), replica.clone(), sql.clone()).unwrap();
+            check_config_changes(&format!("replica_{}", index), replica.clone(), &sql).unwrap();
         }
     }
 }
@@ -209,6 +210,7 @@ fn mount(fs: InnerFileSystem) -> Result<(), AnyError> {
             error!("Unable to mount filesystem: {}", e);
             error!("Maybe is was mounted before?, try `umount {}`", &mount_point);
             error!("If it says `target is busy`, close the programs that are using the mount point");
+            error!("If it says `mountpoint is not empty`, delete everything inside the mount point");
             error!("Existing");
             std::process::exit(-1);
         }
@@ -513,7 +515,7 @@ fn import_index(format: IndexExportFormat, path: PathBuf) -> Result<(), AnyError
     let output_file = "./imported_index.db";
     info!("Importing index from {:?} to {:?}", &path, output_file);
 
-    let sql = Rc::new(MetadataDB::open(output_file));
+    let sql = Arc::new(MetadataDB::open(output_file));
     sql.run_migrations().expect("Unable to run migrations");
 
     let data = fs::read_to_string(&path).context("Unable to read index file")?;
@@ -525,7 +527,7 @@ fn import_index(format: IndexExportFormat, path: PathBuf) -> Result<(), AnyError
 
     // Remove previous data and settings
     sql.nuke()?;
-    sql.import_tree(Rc::new(RefCell::new(tree)))?;
+    sql.import_tree(Arc::new(RefCell::new(tree)))?;
     info!("Index imported successfully");
     Ok(())
 }

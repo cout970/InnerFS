@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 use std::{env, fs};
 
@@ -34,6 +33,7 @@ struct YamlConfig {
     compression_level: Option<u32>,
     use_versioning: Option<bool>,
     webdav: Option<YamlWebdavConfig>,
+    sync: Option<YamlSyncConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -73,6 +73,13 @@ pub struct YamlWebdavConfig {
     pub password: Option<YamlEncryptionKeyConfig>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct YamlSyncConfig {
+    pub address: Option<String>,
+    pub port: Option<u16>,
+    pub metadata_only: Option<bool>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum StorageOption {
     FileSystem,
@@ -91,6 +98,7 @@ pub struct Config {
     pub store_file_change_history: bool,
     pub readonly: bool,
     pub webdav: WebdavConfig,
+    pub sync: SyncConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +126,13 @@ pub struct WebdavConfig {
     pub enable_auth: bool,
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncConfig {
+    pub address: String,
+    pub port: u16,
+    pub metadata_only: bool,
 }
 
 /// Read and parse the main config file
@@ -221,6 +236,14 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
             .unwrap_or_else(|| "".to_string()),
     };
 
+    let yaml_sync = config.sync.clone().unwrap_or_default();
+
+    let sync = SyncConfig {
+        address: yaml_sync.address.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
+        port: yaml_sync.port.unwrap_or(45684),
+        metadata_only: yaml_sync.metadata_only.unwrap_or(false),
+    };
+
     let mut cfg = Config {
         database_file: config.database_file.unwrap_or("./index.db".to_string()),
         mount_point: config.mount_point.unwrap_or("./data".to_string()),
@@ -230,6 +253,7 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
         store_file_change_history: config.store_file_change_history.unwrap_or(true),
         readonly: config.readonly.unwrap_or(false),
         webdav,
+        sync,
     };
 
     let replicas = config.replicas.clone().unwrap_or_default();
@@ -331,7 +355,7 @@ fn extract_encryption_key(value: YamlEncryptionKeyConfig) -> String {
     }
 }
 
-pub fn check_config_changes(prefix: &str, config: Arc<StorageConfig>, sql: Rc<MetadataDB>) -> Result<(), AnyError> {
+pub fn check_config_changes(prefix: &str, config: Arc<StorageConfig>, sql: &MetadataDB) -> Result<(), AnyError> {
     // Changing storage_option will make all the files not available
     let setting_storage_option = format!("{}:storage_option", prefix);
     let storage_option = config.storage_backend.to_string();

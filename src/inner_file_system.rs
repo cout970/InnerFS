@@ -8,11 +8,12 @@ use anyhow::{anyhow, Context};
 use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, ENOTSUP, EROFS, O_RDONLY, O_RDWR, O_WRONLY};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+pub type SafeInnerFileSystem = Arc<Mutex<InnerFileSystem>>;
 
 pub struct InnerFileSystem {
-    pub sql: Rc<MetadataDB>,
+    pub sql: MetadataDB,
     pub config: Arc<Config>,
     pub storage: StorageInterface,
 }
@@ -24,8 +25,12 @@ pub struct InnerFileSystemError {
 }
 
 impl InnerFileSystem {
-    pub fn new(sql: Rc<MetadataDB>, config: Arc<Config>, storage: StorageInterface) -> Self {
+    pub fn new(sql: MetadataDB, config: Arc<Config>, storage: StorageInterface) -> Self {
         Self { sql, config, storage }
+    }
+
+    pub fn into_safe(self) -> SafeInnerFileSystem {
+        Arc::new(Mutex::new(self))
     }
 
     pub fn read_all(&mut self, id: i64) -> Result<Vec<u8>, InnerFileSystemError> {
@@ -165,6 +170,10 @@ impl InnerFileSystem {
 
             // Remove the already existing file in the target location
             if let Some(new_entry) = this.sql.find_directory_entry(new_parent_id, new_name)? {
+                if this.config.store_file_change_history {
+                    let external_id = this.sql.get_file_external_id(new_entry.entry_file_id)?.unwrap_or_else(|| "".to_string());
+                    this.sql.register_file_deletion(new_entry.entry_file_id, &external_id)?;
+                }
                 this.sql.remove_file(new_entry.entry_file_id)?;
             }
 
@@ -588,11 +597,20 @@ impl InnerFileSystem {
         self.sql.remove_directory_entry(dir_entry.id)?;
 
         if self.config.store_file_change_history {
-            self.sql.register_file_change(&file, FileChangeKind::Deleted)?;
             self.sql
                 .register_file_change(&parent_directory, FileChangeKind::UpdatedContents)?;
         }
         self.cleanup()?;
+        Ok(())
+    }
+
+    pub fn remove_file(&mut self, id: i64) -> Result<(), InnerFileSystemError> {
+        if let Some(file) = self.sql.get_file(id)? {
+            let full_path = self.sql.get_file_path(file.id)?;
+            self.storage.unlinked_files.insert(id, ObjInfo::new(&file, &full_path));
+            self.sql.remove_file(file.id)?;
+            self.cleanup()?;
+        }
         Ok(())
     }
 
@@ -772,12 +790,21 @@ impl InnerFileSystem {
 
     pub fn cleanup(&mut self) -> Result<(), InnerFileSystemError> {
         let sql = self.sql.clone();
-        self.storage
-            .cleanup(Rc::new(move |info, test| Self::file_is_in_use(&sql, info, test)))?;
+        let removed = self
+            .storage
+            .cleanup(Arc::new(move |info, test| Self::file_is_in_use(&sql, info, test)))?;
+
+        if self.config.store_file_change_history {
+            for (id, external_id) in removed {
+                self.sql.register_file_deletion(id, &external_id)?;
+                self.sql.remove_file(id)?;
+            }
+        }
+
         Ok(())
     }
 
-    fn file_is_in_use(sql: &Rc<MetadataDB>, info: &ObjInfo, test: PathGenerator) -> Result<bool, AnyError> {
+    fn file_is_in_use(sql: &MetadataDB, info: &ObjInfo, test: PathGenerator) -> Result<bool, AnyError> {
         let exists = match test {
             PathGenerator::Path => sql.get_file_by_path(&info.full_path)?.is_some(),
             PathGenerator::Sha512 => sql.get_file_by_sha512(&info.sha512)?.is_some(),
@@ -814,15 +841,13 @@ impl InnerFileSystem {
         &mut self,
         func: impl FnOnce(&mut Self) -> Result<R, InnerFileSystemError>,
     ) -> Result<R, InnerFileSystemError> {
-        self.sql
-            .connection
-            .execute("BEGIN TRANSACTION")
-            .context("Database error")?;
+        self.sql.execute0("BEGIN TRANSACTION").context("Database error")?;
         let res = func(self);
+
         if res.is_ok() {
-            self.sql.connection.execute("COMMIT").context("Database error")?;
+            self.sql.execute0("COMMIT").context("Database error")?;
         } else {
-            self.sql.connection.execute("ROLLBACK").context("Database error")?;
+            self.sql.execute0("ROLLBACK").context("Database error")?;
         }
         res
     }

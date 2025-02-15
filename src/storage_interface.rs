@@ -6,13 +6,13 @@ use anyhow::anyhow;
 use libc::{O_APPEND, O_RDONLY};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Callback to detects if a file is still in use, allowing correct deletion of de-duplicated files.
-pub type ObjInUseFn = Rc<dyn Fn(&ObjInfo, PathGenerator) -> Result<bool, AnyError>>;
+pub type ObjInUseFn = Arc<dyn Fn(&ObjInfo, PathGenerator) -> Result<bool, AnyError>>;
 
 pub struct StorageInterface {
-    pub obj_storage: Box<dyn ObjectStorage>,
+    pub obj_storage: Box<dyn ObjectStorage + Send + Sync>,
     pub open_files: HashMap<u64, OpenFile>,
     pub unlinked_files: HashMap<i64, ObjInfo>,
     pub file_page_cache: HashMap<i64, Vec<u8>>,
@@ -237,20 +237,20 @@ impl StorageInterface {
     }
 
     /// Performs the remove operation on all files that are pending removal.
-    pub fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
+    pub fn cleanup(&mut self, is_in_use: ObjInUseFn) -> Result<Vec<(i64, String)>, AnyError> {
         let mut removed = vec![];
 
         for (id, info) in &self.unlinked_files {
             if self.get_open_files_by_ino(*id).is_empty() {
                 self.obj_storage.remove(info, is_in_use.clone())?;
-                removed.push(*id);
+                removed.push((*id, info.external_id.clone()));
             }
         }
 
-        for i in removed {
-            self.unlinked_files.remove(&i);
+        for (id, _) in &removed {
+            self.unlinked_files.remove(id);
         }
-        Ok(())
+        Ok(removed)
     }
 
     /// Removes all files from the storage.

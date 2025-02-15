@@ -92,6 +92,16 @@ webdav:
   # - An object with an "env" field set to the name of an environment variable that contains the key.
   password: ''
 
+# Options for sync-listen and sync-connect commands
+# Note: when using sync-connect, the option readonly must be set to true
+sync:
+  # Server address to connect or listen
+  address: 127.0.0.1
+  # Server port to connect or listen
+  port: 45684
+  # Sync only file metadata and ignore file contents, useful if both client and server share the same backend storage
+  metadata_only: false
+
 ### Default values for undefined fields in primary/replicas
 blob_storage: ./blob
 s3_bucket: my-bucket
