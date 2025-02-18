@@ -7,7 +7,7 @@ use libc::{
     c_int, ENOENT, ENOSYS, EROFS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH,
     O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY,
 };
-use log::{error, trace, warn};
+use log::{debug, error, trace, warn};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -420,7 +420,7 @@ impl Filesystem for FuseFileSystem {
     fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyRead) {
         trace!("FS read(ino: {}, file_handle: {}, offset: {}, size: {})", ino, fh, offset, size);
         match self.fs.read(fh, ino as i64, offset, size as usize) {
-            Ok(data) => {
+            Ok((data, _len)) => {
                 reply.data(&data);
             }
             Err(e) => {
@@ -777,7 +777,7 @@ impl From<&FileRow> for FileAttr {
         FileAttr {
             ino: value.id as u64,
             size: value.size as u64,
-            blocks: value.size as u64 / BLOCK_SIZE as u64,
+            blocks: (value.size as u64).div_ceil(BLOCK_SIZE as u64),
             atime: system_time_from_timestamp(value.accessed_at),
             mtime: system_time_from_timestamp(value.updated_at),
             ctime: system_time_from_timestamp(value.updated_at),

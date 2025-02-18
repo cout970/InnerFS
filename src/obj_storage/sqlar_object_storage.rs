@@ -5,6 +5,7 @@ use crate::storage_interface::ObjInUseFn;
 use crate::AnyError;
 use log::debug;
 use std::sync::Arc;
+use crate::utils::humanize_bytes_binary;
 
 #[derive(Clone)]
 pub struct SqlarObjectStorage {
@@ -42,7 +43,7 @@ impl ObjectStorage for SqlarObjectStorage {
 
     fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
         let name = self.path(&info);
-        debug!("Put: {}", name);
+        debug!("Put: {} ({})", name, humanize_bytes_binary(content.len()));
 
         let file = SqlarFile {
             name: name.clone(),

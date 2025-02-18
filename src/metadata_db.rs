@@ -1,7 +1,7 @@
 use crate::fs_tree::{FsTree, FsTreeChild, FsTreeKind, FsTreeRef};
 use crate::semver::Semver;
 use crate::{AnyError, VERSION};
-use anyhow::anyhow;
+use anyhow::{anyhow};
 use itertools::Itertools;
 use log::info;
 use sqlite::{Bindable, State, Statement};
@@ -60,6 +60,7 @@ pub enum FileChangeKind {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileChange {
     pub id: i64,
     pub file_id: i64,
@@ -141,7 +142,12 @@ impl MetadataDB {
         }
 
         if version < Semver::new(1, 1, 0) {
-            self.execute0(include_str!("./sql/migration_external_ids.sql"))?;
+            self.execute0("ALTER TABLE files ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")?;
+            self.execute0("UPDATE files SET external_id = (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6)))) WHERE external_id = ''")?;
+
+            self.execute0("ALTER TABLE directory_entries ADD COLUMN external_id TEXT NOT NULL DEFAULT ''")?;
+            self.execute0("UPDATE directory_entries SET external_id = (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6)))) WHERE external_id = ''")?;
+
             version = Semver::new(1, 1, 0);
             self.execute1(
                 "INSERT INTO migrations (version, created_at) VALUES (:version, unixepoch('now'))",
@@ -150,7 +156,7 @@ impl MetadataDB {
         }
 
         if version < Semver::new(1, 2, 0) {
-            let _ = self.execute0("alter table main.file_changes add column file_external_id text not null default ''");
+            let _ = self.execute0("ALTER TABLE main.file_changes ADD COLUMN file_external_id TEXT NOT NULL DEFAULT ''");
 
             version = Semver::new(1, 2, 0);
             self.execute1(
@@ -377,13 +383,14 @@ impl MetadataDB {
     }
 
     pub fn update_external_file(&self, file: &FileRow) -> Result<(), AnyError> {
-        self.execute14(
-            "UPDATE files SET version = version + 1, \
-            kind = :kind, name = :name, external_id = :external_id, uid = :uid, gid = :gid, perms = :perms, size = :size, \
+        self.execute15(
+            "UPDATE files SET version = :version, kind = :kind, name = :name, \
+            external_id = :external_id, uid = :uid, gid = :gid, perms = :perms, size = :size, \
             sha512 = :sha512, encryption_key = :encryption_key, compression = :compression, \
             accessed_at = :accessed_at, created_at = :created_at, updated_at = :updated_at \
             WHERE id = :id",
             (":kind", file.kind),
+            (":version", file.version),
             (":name", file.name.as_str()),
             (":external_id", file.external_id.as_str()),
             (":uid", file.uid),
@@ -453,6 +460,17 @@ impl MetadataDB {
         Ok(())
     }
 
+    fn directory_entry_from_statement(row: &Statement) -> Result<DirectoryEntry, AnyError> {
+        Ok(DirectoryEntry {
+            id: row.read("id")?,
+            directory_file_id: row.read("directory_file_id")?,
+            entry_file_id: row.read("entry_file_id")?,
+            name: row.read("name")?,
+            kind: row.read("kind")?,
+            external_id: row.read("external_id")?,
+        })
+    }
+
     pub fn find_directory_entry(&self, directory_file_id: i64, name: &str) -> Result<Option<DirectoryEntry>, AnyError> {
         self.get_row(
             "SELECT * FROM directory_entries WHERE directory_file_id = :directory_file_id and name = :name",
@@ -460,16 +478,7 @@ impl MetadataDB {
                 (":directory_file_id", directory_file_id.to_string().as_str()),
                 (":name", name),
             ][..],
-            |row| {
-                Ok(DirectoryEntry {
-                    id: row.read("id")?,
-                    directory_file_id: row.read("directory_file_id")?,
-                    entry_file_id: row.read("entry_file_id")?,
-                    name: row.read("name")?,
-                    kind: row.read("kind")?,
-                    external_id: row.read("external_id")?,
-                })
-            },
+            Self::directory_entry_from_statement,
         )
     }
 
@@ -546,16 +555,7 @@ impl MetadataDB {
                 (":limit", limit),
                 (":offset", offset),
             ][..],
-            |row| {
-                Ok(DirectoryEntry {
-                    id: row.read("id")?,
-                    directory_file_id: row.read("directory_file_id")?,
-                    entry_file_id: row.read("entry_file_id")?,
-                    name: row.read("name")?,
-                    kind: row.read("kind")?,
-                    external_id: row.read("external_id")?,
-                })
-            },
+            Self::directory_entry_from_statement,
         )
     }
 
@@ -565,16 +565,7 @@ impl MetadataDB {
             FROM directory_entries \
             WHERE directory_file_id = :directory_file_id";
 
-        self.get_rows(query, (":directory_file_id", directory_file_id), |row| {
-            Ok(DirectoryEntry {
-                id: row.read("id")?,
-                directory_file_id: row.read("directory_file_id")?,
-                entry_file_id: row.read("entry_file_id")?,
-                name: row.read("name")?,
-                kind: row.read("kind")?,
-                external_id: row.read("external_id")?,
-            })
-        })
+        self.get_rows(query, (":directory_file_id", directory_file_id), Self::directory_entry_from_statement)
     }
 
     pub fn update_directory_entry(&self, entry: &DirectoryEntry) -> Result<(), AnyError> {
@@ -690,7 +681,7 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn get_pending_external_changes(&self, limit: i64) -> Result<Vec<ExternalFileChange>, AnyError>{
+    pub fn get_pending_external_changes(&self, limit: i64) -> Result<Vec<ExternalFileChange>, AnyError> {
         let rows = self.get_rows(
             "SELECT * FROM external_file_changes WHERE status = 0 ORDER BY changed_at LIMIT :limit",
             (":limit", limit),
@@ -706,18 +697,38 @@ impl MetadataDB {
                     retries: row.read::<i64, _>("retries")? as u32,
                     imported_at: row.read("imported_at")?,
                 })
-            }
+            },
         )?;
         Ok(rows)
     }
 
     pub fn get_last_external_change_id(&self) -> Result<i64, AnyError> {
-        let id =
-            self.get_row("SELECT id FROM external_file_changes ORDER BY id DESC LIMIT 1", NO_BINDINGS.as_ref(), |row| {
-                Ok(row.read::<i64, _>("id")?)
-            })?;
+        let id = self.get_row(
+            "SELECT id FROM external_file_changes ORDER BY id DESC LIMIT 1",
+            NO_BINDINGS.as_ref(),
+            |row| Ok(row.read::<i64, _>("id")?),
+        )?;
 
         Ok(id.unwrap_or(0i64))
+    }
+
+    pub fn get_last_file_change(&self) -> Result<Option<FileChange>, AnyError> {
+        let result = self.get_row(
+            "SELECT * FROM file_changes ORDER BY id DESC LIMIT 1",
+            NO_BINDINGS.as_ref(),
+            |row| {
+                Ok(FileChange {
+                    id: row.read("id")?,
+                    file_id: row.read("file_id")?,
+                    file_external_id: row.read("file_external_id")?,
+                    file_version: row.read("file_version")?,
+                    kind: row.read("kind")?,
+                    file_hash: row.read("file_hash")?,
+                    changed_at: row.read("changed_at")?,
+                })
+            },
+        )?;
+        Ok(result)
     }
 
     pub fn update_external_file_change(&self, change: ExternalFileChange) -> Result<(), AnyError> {
@@ -730,19 +741,18 @@ impl MetadataDB {
         Ok(())
     }
 
+    pub fn get_all_files(&self) -> Result<Vec<FileRow>, AnyError> {
+        self.get_rows("SELECT * FROM files", NO_BINDINGS.as_ref(), Self::file_row_from_statement)
+    }
+
+    pub fn get_all_directory_entries(&self) -> Result<Vec<DirectoryEntry>, AnyError> {
+        self.get_rows("SELECT * FROM directory_entries", NO_BINDINGS.as_ref(), Self::directory_entry_from_statement)
+    }
+
     pub fn get_tree(&self) -> Result<FsTreeRef, AnyError> {
         #[allow(clippy::unnecessary_cast)]
         let entries: Vec<DirectoryEntry> =
-            self.get_rows("SELECT * FROM directory_entries", NO_BINDINGS.as_ref(), |row| {
-                Ok(DirectoryEntry {
-                    id: row.read("id")?,
-                    directory_file_id: row.read("directory_file_id")?,
-                    entry_file_id: row.read("entry_file_id")?,
-                    name: row.read("name")?,
-                    kind: row.read("kind")?,
-                    external_id: row.read("external_id")?,
-                })
-            })?;
+            self.get_rows("SELECT * FROM directory_entries", NO_BINDINGS.as_ref(), Self::directory_entry_from_statement)?;
 
         // In memory index of directory entries
         let mut children: HashMap<i64, Vec<DirectoryEntry>> = HashMap::new();
@@ -910,7 +920,9 @@ impl MetadataDB {
         M: for<'l> FnOnce(&Statement<'l>) -> Result<R, AnyError>,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(bindings)?;
 
         if let State::Row = statement.next()? {
@@ -926,7 +938,9 @@ impl MetadataDB {
         M: for<'l> Fn(&Statement<'l>) -> Result<R, AnyError>,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(bindings)?;
         let mut result = vec![];
 
@@ -938,8 +952,14 @@ impl MetadataDB {
 
     pub fn execute0(&self, query: &str) -> Result<(), AnyError> {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
-        while statement.next()? != State::Done {}
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -948,9 +968,15 @@ impl MetadataDB {
         B0: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -960,10 +986,16 @@ impl MetadataDB {
         B1: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -974,11 +1006,17 @@ impl MetadataDB {
         B2: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -990,12 +1028,18 @@ impl MetadataDB {
         B3: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
         statement.bind(b3)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1016,13 +1060,19 @@ impl MetadataDB {
         B4: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
         statement.bind(b3)?;
         statement.bind(b4)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1045,14 +1095,20 @@ impl MetadataDB {
         B5: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
         statement.bind(b3)?;
         statement.bind(b4)?;
         statement.bind(b5)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1077,7 +1133,9 @@ impl MetadataDB {
         B6: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1085,7 +1143,11 @@ impl MetadataDB {
         statement.bind(b4)?;
         statement.bind(b5)?;
         statement.bind(b6)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1112,7 +1174,9 @@ impl MetadataDB {
         B7: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1121,7 +1185,11 @@ impl MetadataDB {
         statement.bind(b5)?;
         statement.bind(b6)?;
         statement.bind(b7)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1150,7 +1218,9 @@ impl MetadataDB {
         B8: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1160,7 +1230,11 @@ impl MetadataDB {
         statement.bind(b6)?;
         statement.bind(b7)?;
         statement.bind(b8)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1191,7 +1265,9 @@ impl MetadataDB {
         B9: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1202,7 +1278,11 @@ impl MetadataDB {
         statement.bind(b7)?;
         statement.bind(b8)?;
         statement.bind(b9)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1235,7 +1315,9 @@ impl MetadataDB {
         B10: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1247,7 +1329,11 @@ impl MetadataDB {
         statement.bind(b8)?;
         statement.bind(b9)?;
         statement.bind(b10)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1282,7 +1368,9 @@ impl MetadataDB {
         B11: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1295,7 +1383,11 @@ impl MetadataDB {
         statement.bind(b9)?;
         statement.bind(b10)?;
         statement.bind(b11)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1332,7 +1424,9 @@ impl MetadataDB {
         B12: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1346,7 +1440,11 @@ impl MetadataDB {
         statement.bind(b10)?;
         statement.bind(b11)?;
         statement.bind(b12)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1385,7 +1483,9 @@ impl MetadataDB {
         B13: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1400,7 +1500,11 @@ impl MetadataDB {
         statement.bind(b11)?;
         statement.bind(b12)?;
         statement.bind(b13)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1441,7 +1545,9 @@ impl MetadataDB {
         B14: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1457,7 +1563,11 @@ impl MetadataDB {
         statement.bind(b12)?;
         statement.bind(b13)?;
         statement.bind(b14)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 
@@ -1500,7 +1610,9 @@ impl MetadataDB {
         B15: Bindable + Clone,
     {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection.prepare(query)?;
+        let mut statement = connection
+            .prepare(query)
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
         statement.bind(b0)?;
         statement.bind(b1)?;
         statement.bind(b2)?;
@@ -1517,7 +1629,11 @@ impl MetadataDB {
         statement.bind(b13)?;
         statement.bind(b14)?;
         statement.bind(b15)?;
-        statement.next()?;
+        while statement
+            .next()
+            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+            != State::Done
+        {}
         Ok(())
     }
 }

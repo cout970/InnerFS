@@ -728,13 +728,13 @@ impl InnerFileSystem {
         Ok(fh)
     }
 
-    pub fn read(&mut self, fh: u64, id: i64, offset: i64, size: usize) -> Result<Vec<u8>, InnerFileSystemError> {
+    pub fn read(&mut self, fh: u64, id: i64, offset: i64, size: usize) -> Result<(Vec<u8>, usize), InnerFileSystemError> {
         let file = self.get_file_or_err(id)?;
 
         let mut buff = vec![0u8; size];
         let len = self.storage.read(fh, &file, offset as u64, &mut buff)?;
         buff.truncate(len);
-        Ok(buff)
+        Ok((buff, len))
     }
 
     pub fn write(&mut self, fh: u64, id: i64, offset: i64, data: &[u8]) -> Result<usize, InnerFileSystemError> {
