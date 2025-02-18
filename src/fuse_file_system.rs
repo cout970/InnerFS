@@ -7,7 +7,7 @@ use libc::{
     c_int, ENOENT, ENOSYS, EROFS, O_APPEND, O_CREAT, O_DSYNC, O_EXCL, O_NOATIME, O_NOCTTY, O_NONBLOCK, O_PATH,
     O_RDONLY, O_RDWR, O_SYNC, O_TMPFILE, O_TRUNC, O_WRONLY,
 };
-use log::{debug, error, trace, warn};
+use log::{error, trace, warn};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
