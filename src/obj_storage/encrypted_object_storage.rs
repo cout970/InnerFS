@@ -189,11 +189,11 @@ impl BlobProcessor for EncryptedObjectStorage {
 
         // Parse header
         let parts: Vec<&str> = header.trim().split('$').collect();
-        if parts.len() < 3 {
+        if parts.len() < 4 {
             return Err(anyhow!("Invalid encrypted blob header"));
         }
 
-        let key = FileKey::deserialize(parts[2])?;
+        let key = FileKey::deserialize(parts[3])?;
         EncryptedObjectStorage::decrypt(&self.config.encryption_key, &key, content)
     }
 }

@@ -21,7 +21,6 @@ pub struct StorageInterface {
 pub struct OpenFile {
     pub fh: u64,
     pub ino: i64,
-    pub full_path: String,
     pub mode: i32,
     pub modified: bool,
 }
@@ -51,11 +50,7 @@ impl StorageInterface {
     }
 
     /// Opens a file for reading or writing. Returns true if the file was opened successfully.
-    pub fn open(&mut self, file: &mut FileRow, full_path: &str, mode: u32) -> Result<u64, AnyError> {
-        if (mode as i32) & O_APPEND != 0 {
-            return Err(anyhow::anyhow!("Append mode is not supported"));
-        }
-
+    pub fn open(&mut self, file: &mut FileRow, mode: u32) -> Result<u64, AnyError> {
         self.fh_counter += 1;
         let fh = self.fh_counter;
 
@@ -64,7 +59,6 @@ impl StorageInterface {
             OpenFile {
                 fh,
                 ino: file.id,
-                full_path: full_path.to_string(),
                 mode: mode as i32,
                 modified: false,
             },
@@ -75,7 +69,6 @@ impl StorageInterface {
 
     /// Reads data from a file. Returns the number of bytes read.
     pub fn read(&mut self, fh: u64, file: &FileRow, offset: u64, buff: &mut [u8]) -> Result<usize, AnyError> {
-        let full_path: String;
         {
             let row = self
                 .open_files
@@ -85,13 +78,11 @@ impl StorageInterface {
             if row.mode & libc::O_WRONLY != 0 {
                 return Err(anyhow::anyhow!("File is write-only ({})", file.name));
             }
-
-            full_path = row.full_path.clone();
         }
 
         if !self.file_page_cache.contains_key(&file.id) {
             let content = if !file.sha512.is_empty() {
-                self.read_file(&file, &full_path)?
+                self.read_file(&file)?
             } else {
                 vec![]
             };
@@ -110,7 +101,7 @@ impl StorageInterface {
         Ok(read_len)
     }
 
-    fn read_file(&mut self, file: &FileRow, _full_path: &str) -> Result<Vec<u8>, AnyError> {
+    fn read_file(&mut self, file: &FileRow) -> Result<Vec<u8>, AnyError> {
         let blobs = self.metadata_db.get_file_blobs_by_file(file.id)?;
 
         let paths = blobs
@@ -143,7 +134,7 @@ impl StorageInterface {
         Ok(content)
     }
 
-    fn write_file(&mut self, file: &mut FileRow, _full_path: &str, bytes: &[u8]) -> Result<(), AnyError> {
+    fn write_file(&mut self, file: &mut FileRow, bytes: &[u8]) -> Result<(), AnyError> {
         // Sha512 of contents as id for the object
         file.sha512 = slow_hash(bytes);
         file.size = bytes.len() as i64;
@@ -264,13 +255,27 @@ impl StorageInterface {
 
     /// Writes data to a file. Returns the number of bytes written.
     pub fn write(&mut self, fh: u64, file: &FileRow, offset: u64, buff: &[u8]) -> Result<usize, AnyError> {
-        let row = self
-            .open_files
-            .get_mut(&fh)
-            .ok_or_else(|| anyhow!("Trying to use a file that is not open, fd: {}, ino: {}", fh, file.id))?;
+        let mode = {
+            let row = self
+                .open_files
+                .get_mut(&fh)
+                .ok_or_else(|| anyhow!("Trying to use a file that is not open, fd: {}, ino: {}", fh, file.id))?;
 
-        if row.mode & O_RDONLY != 0 {
+            row.mode
+        };
+
+        if mode & O_RDONLY != 0 {
             return Err(anyhow::anyhow!("File is read-only"));
+        }
+
+        // If the file is opened in append mode, load existing content to prevent overwriting
+        if mode & O_APPEND != 0 && !self.file_page_cache.contains_key(&file.id) {
+            let content = if !file.sha512.is_empty() {
+                self.read_file(&file)?
+            } else {
+                vec![]
+            };
+            self.file_page_cache.insert(file.id, content);
         }
 
         let offset = offset as usize;
@@ -290,7 +295,14 @@ impl StorageInterface {
             cache[offset..offset + buff.len()].copy_from_slice(buff);
         }
 
-        row.modified = true;
+        {
+            let row = self
+                .open_files
+                .get_mut(&fh)
+                .ok_or_else(|| anyhow!("Trying to use a file that is not open, fd: {}, ino: {}", fh, file.id))?;
+
+            row.modified = true;
+        }
         Ok(buff.len())
     }
 
@@ -322,20 +334,26 @@ impl StorageInterface {
             return Err(anyhow!("Trying to close a file that is not open, fd: {}, ino: {}", fh, file.id));
         }
 
-        let full_path: String;
-        {
-            let row = self.open_files.get_mut(&fh).unwrap();
-            if !row.modified {
-                return Ok(false);
-            }
+        if !self.open_files.get(&fh).unwrap().modified {
+            return Ok(false);
+        }
 
-            full_path = row.full_path.clone();
+        let mode = self.open_files.get(&fh).unwrap().mode;
+
+        // If the file is opened in append mode, load existing content to prevent overwriting
+        if mode & O_APPEND != 0 && !self.file_page_cache.contains_key(&file.id) {
+            let content = if !file.sha512.is_empty() {
+                self.read_file(&file)?
+            } else {
+                vec![]
+            };
+            self.file_page_cache.insert(file.id, content);
         }
 
         let empty: Vec<u8> = vec![];
         let cache = self.file_page_cache.get(&file.id).unwrap_or(&empty).clone();
 
-        self.write_file(file, &full_path, &cache)?;
+        self.write_file(file, &cache)?;
         Ok(true)
     }
 

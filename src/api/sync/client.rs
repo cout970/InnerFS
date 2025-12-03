@@ -454,8 +454,7 @@ async fn sync_file_contents(fs: &SafeInnerFileSystem, message_stream: &mut Messa
 
             if let Some(id) = id {
                 let mut file = guard.get_file_or_err(id)?;
-                let full_path = guard.sql.get_file_path(file.id)?;
-                let fh = guard.storage.open(&mut file, &full_path, O_WRONLY as u32)?;
+                let fh = guard.storage.open(&mut file, O_WRONLY as u32)?;
                 guard.storage.write(fh, &mut file, 0, &bytes)?;
                 guard.storage.close(fh, &mut file)?;
             } else {

@@ -37,8 +37,7 @@ impl InnerFileSystem {
         const BLOCK_SIZE: usize = 65536; // 64kb
 
         let mut file = self.get_file_or_err(id)?;
-        let full_path = self.sql.get_file_path(file.id)?;
-        let fh = self.storage.open(&mut file, &full_path, O_RDONLY as u32)?;
+        let fh = self.storage.open(&mut file, O_RDONLY as u32)?;
         self.sql.file_set_access_time(file.id, current_timestamp())?;
 
         let mut complete_buff: Vec<u8> = Vec::with_capacity(file.size as usize);
@@ -73,8 +72,7 @@ impl InnerFileSystem {
         const BLOCK_SIZE: usize = 65536; // 64kb
 
         let mut file = self.get_file_or_err(id)?;
-        let full_path = self.sql.get_file_path(file.id)?;
-        let fh = self.storage.open(&mut file, &full_path, O_RDONLY as u32)?;
+        let fh = self.storage.open(&mut file, O_RDONLY as u32)?;
         self.sql.file_set_access_time(file.id, current_timestamp())?;
 
         let mut complete_buff: Vec<u8> = Vec::with_capacity(file.size as usize);
@@ -113,8 +111,7 @@ impl InnerFileSystem {
         const BLOCK_SIZE: usize = 65536; // 64kb
 
         let mut file = self.get_file_or_err(id)?;
-        let full_path = self.sql.get_file_path(file.id)?;
-        let fh = self.storage.open(&mut file, &full_path, O_WRONLY as u32)?;
+        let fh = self.storage.open(&mut file, O_WRONLY as u32)?;
 
         self.sql.file_set_access_time(file.id, current_timestamp())?;
 
@@ -716,10 +713,9 @@ impl InnerFileSystem {
             return error(EISDIR, anyhow!("Cannot open directory"));
         }
 
-        let full_path = self.sql.get_file_path(file.id)?;
         let fh = self
             .storage
-            .open(&mut file, &full_path, flags)
+            .open(&mut file, flags)
             .context("Error opening file")?;
 
         file.accessed_at = current_timestamp();
