@@ -1,13 +1,9 @@
 use crate::config::{StorageConfig, StorageOption};
 use crate::metadata_db::{FileRow, MetadataDB};
-use crate::obj_storage::compressed_object_storage::CompressedObjectStorage;
-use crate::obj_storage::encrypted_object_storage::EncryptedObjectStorage;
-use crate::obj_storage::fs_object_storage::FsObjectStorage;
-use crate::obj_storage::rocks_db_object_storage::RocksDbObjectStorage;
-use crate::obj_storage::s3_object_storage::S3ObjectStorage;
-use crate::obj_storage::sqlar_object_storage::SqlarObjectStorage;
-use crate::obj_storage::versioned_object_storage::VersionedObjectStorage;
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::fs_object_storage::FsBackend;
+use crate::obj_storage::rocks_db_object_storage::RocksDbBackend;
+use crate::obj_storage::s3_object_storage::S3Backend;
+use crate::obj_storage::sqlar_object_storage::SqlarBackend;
 use crate::AnyError;
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -24,7 +20,6 @@ pub mod sqlar_object_storage;
 pub mod compressed_object_storage;
 pub mod encrypted_object_storage;
 pub mod replicated_object_storage;
-pub mod versioned_object_storage;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ObjInfo {
@@ -43,36 +38,29 @@ pub struct ObjInfo {
     pub compression: String,
 }
 
-/// Method to test is a file exists, to handle deletion of de-duplicated files.
-/// When multiple files share the same object in storage, we need to check if the object is still
-/// being used by any other file before deleting it.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub enum PathGenerator {
-    // Check if there are other files with the same path
-    Path,
-    // Check if there are other files with the same content
-    Sha512,
-    // Check if there are other files with the same path (based on file external_id)
-    ExternalId,
+#[derive(Debug, Clone)]
+pub struct RemoteBlob {
+    pub path: String,
+    pub contents: Vec<u8>,
 }
 
-impl PathGenerator {
-    pub fn to_string(self) -> String {
-        match self {
-            PathGenerator::Path => "path".to_string(),
-            PathGenerator::Sha512 => "sha512".to_string(),
-            PathGenerator::ExternalId => "external_id".to_string(),
-        }
-    }
-}
+pub trait BlobStorage: Send + Sync {
+    // Load data
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError>;
 
-pub trait ObjectStorage : Send + Sync {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError>;
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError>;
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError>;
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError>;
+    // Store data
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError>;
+
+    // Remove data
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError>;
+
+    // Remove everything
     fn nuke(&mut self) -> Result<(), AnyError>;
-    fn clone(&self) -> Box<dyn ObjectStorage>;
+}
+
+pub trait BlobProcessor: Send + Sync {
+    fn on_store(&self, blob: Vec<u8>) -> Result<Vec<u8>, AnyError>;
+    fn on_load(&self, blob: Vec<u8>) -> Result<Vec<u8>, AnyError>;
 }
 
 impl Display for ObjInfo {
@@ -101,31 +89,15 @@ impl ObjInfo {
     }
 }
 
-pub fn create_object_storage(config: Arc<StorageConfig>, sql: &MetadataDB) -> Box<dyn ObjectStorage> {
-    let mut obj_storage: Box<dyn ObjectStorage> = match &config.storage_backend {
-        StorageOption::FileSystem => Box::new(FsObjectStorage {
+pub fn create_object_storage(config: Arc<StorageConfig>, sql: &MetadataDB) -> Box<dyn BlobStorage> {
+    match &config.storage_backend {
+        StorageOption::FileSystem => Box::new(FsBackend {
             base_path: PathBuf::from(&config.blob_storage),
-            config: config.clone(),
         }),
-        StorageOption::Sqlar => Box::new(SqlarObjectStorage {
+        StorageOption::Sqlar => Box::new(SqlarBackend {
             sql: sql.clone(),
-            config: config.clone(),
         }),
-        StorageOption::S3 => Box::new(S3ObjectStorage::new(config.clone())),
-        StorageOption::RocksDb => Box::new(RocksDbObjectStorage::new(config.clone())),
-    };
-
-    if !config.encryption_key.is_empty() {
-        // Apply encryption if a key is provided
-        obj_storage = Box::new(EncryptedObjectStorage::new(config.clone(), obj_storage));
-    } else if config.compression_level > 0 {
-        // Apply compression if a level is provided
-        obj_storage = Box::new(CompressedObjectStorage::new(config.clone(), obj_storage));
+        StorageOption::S3 => Box::new(S3Backend::new(config.clone())),
+        StorageOption::RocksDb => Box::new(RocksDbBackend::new(config.clone())),
     }
-
-    if config.use_versioning {
-        obj_storage = Box::new(VersionedObjectStorage::new(obj_storage));
-    }
-
-    obj_storage
 }

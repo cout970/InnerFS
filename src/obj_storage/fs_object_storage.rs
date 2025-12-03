@@ -1,86 +1,67 @@
-use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::{BlobStorage, RemoteBlob};
 use crate::AnyError;
 use anyhow::{anyhow, Context};
 use log::{debug, error};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-pub struct FsObjectStorage {
+pub struct FsBackend {
     pub base_path: PathBuf,
-    pub config: Arc<StorageConfig>,
 }
 
-impl FsObjectStorage {
-    pub fn path(&self, info: &ObjInfo) -> PathBuf {
-        let mut path = self.base_path.clone();
-        path.push(self.config.path_of(&info));
-        path
+impl FsBackend {
+    pub fn real_path(&self, virtual_path: &str) -> PathBuf {
+        self.base_path.join(virtual_path)
     }
 }
 
-impl ObjectStorage for FsObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
-        let path = self.path(&info);
-        debug!("Get: {:?}", &path);
+impl BlobStorage for FsBackend {
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError> {
+        let mut blobs = Vec::with_capacity(paths.len());
+        for path in paths {
+            let path = self.real_path(path);
+            debug!("Get: {:?}", &path);
 
-        fs::read(&path).context("FS failed to read file")
-    }
-
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
-        let path = self.path(&info);
-        debug!("Put: {:?}", &path);
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).context("FS failed to create dir")?;
-        }
-        fs::write(&path, content).context("FS failed to write file")
-    }
-
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        let path = self.path(&info);
-
-        // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, self.config.path_generator)? {
-            return Ok(());
-        }
-
-        debug!("Remove: {:?} ({})", &path, info.id);
-
-        match fs::remove_file(&path) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(anyhow!("FS failed to remove file '{:?}': {:?}", path, e))
+            match fs::read(&path) {
+                Ok(blob) => blobs.push(blob),
+                Err(e) => {
+                    return Err(anyhow!("FS failed to read file '{:?}': {:?}", path, e));
                 }
             }
         }
+        Ok(blobs)
     }
 
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let prev_path = self.path(&prev_info);
-        let new_path = self.path(&new_info);
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError> {
+        for blob in blobs {
+            let path = self.real_path(&blob.path);
+            debug!("Put: {:?}", &path);
 
-        if prev_path == new_path {
-            return Ok(());
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).context("FS failed to create dir")?;
+            }
+            fs::write(&path, &blob.contents).context("FS failed to write file")?;
         }
+        Ok(())
+    }
 
-        // Noop, previous file does not exist
-        if fs::metadata(&prev_path).is_err() {
-            return Ok(());
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError> {
+        for path in paths {
+            let path = self.real_path(path);
+            debug!("Remove: {:?}", &path);
+
+            match fs::remove_file(&path) {
+                Ok(_) => {}
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        continue;
+                    } else {
+                        return Err(anyhow!("FS failed to remove file '{:?}': {:?}", path, e));
+                    }
+                }
+            }
         }
-
-        debug!("Rename: {:?} -> {:?}", &prev_path, &new_path);
-
-        if let Some(parent) = new_path.parent() {
-            fs::create_dir_all(parent).context("FS failed to create dir")?;
-        }
-        fs::rename(&prev_path, &new_path)
-            .map_err(|e| anyhow!("FS failed to rename '{:?}' -> '{:?}': {:?}", prev_path, new_path, e))
+        Ok(())
     }
 
     fn nuke(&mut self) -> Result<(), AnyError> {
@@ -109,12 +90,5 @@ impl ObjectStorage for FsObjectStorage {
         }
 
         Ok(())
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(Self {
-            base_path: self.base_path.clone(),
-            config: self.config.clone(),
-        })
     }
 }

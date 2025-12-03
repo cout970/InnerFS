@@ -34,7 +34,7 @@ primary:
   # S3 secret key
   s3_secret_key: '****************************************'
   # If set, all blobs will be encrypted using AES-256-GCM. Each blob will have a unique encryption key,
-  # derived from this value using PBKDF2-HMAC with a salt.
+  # derived from this value using PBKDF2-HMAC with salt.
   #
   # The value can be:
   # - A string containing the encryption key in plain text.
@@ -42,18 +42,11 @@ primary:
   # - An object with an "ask" field set to true, prompting the user to enter the key interactively when the filesystem is mounted.
   # - An object with an "env" field set to the name of an environment variable that contains the key.
   encryption_key: ''
-
-  # Gzip compression, values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
+  # Level of gzip/zstd/lzo compression, values from 0 to 9, where 0 is no compression and 1 (fastest) to 9 (slowest) are the compression levels
   # Automatically disabled if [encryption_key] is set, not recommended for backends that already compress data, like RocksBD or S3
   compression_level: 0
-  # If set to true, the blobs will be stored on a single directory with a hash as filename
-  # otherwise, the original full path will be preserved
-  # Incompatible with encryption, use 'use_id_as_filename' instead
-  use_hash_as_filename: false
-  # If the setting 'use_hash_as_filename' is false, will use the external_id of the file (random UUID) as filename
-  use_id_as_filename: false
-  # If set to true, the blobs will be versioned, and the old versions will be kept forever
-  use_versioning: false
+  # Compression algorithm to use 'gzip', 'zstd' or 'lzo', if compression_level is 0 this option is ignored
+  compression_algorithm: 'zstd'
 
 # Same settings as primary, but allows to specify multiple replicas
 # Write operations will be performed on all replicas, but read operations will be performed on the primary only
@@ -111,6 +104,5 @@ s3_access_key: '********************'
 s3_secret_key: '****************************************'
 encryption_key: ''
 compression_level: 0
-use_versioning: false
 
 ########################################################################################################################

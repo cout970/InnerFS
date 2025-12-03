@@ -1,6 +1,5 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage, PathGenerator};
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::{BlobProcessor};
 use crate::AnyError;
 use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::generic_array::GenericArray;
@@ -15,6 +14,7 @@ use itertools::Itertools;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use std::sync::Arc;
+use crate::utils::{fast_hash};
 
 const AES_KEY_LEN: usize = 32;
 const SALT_LEN: usize = 32;
@@ -26,7 +26,6 @@ const PBKDF2_ITERATIONS: u32 = 256;
 
 pub struct EncryptedObjectStorage {
     config: Arc<StorageConfig>,
-    fs: Box<dyn ObjectStorage>,
 }
 
 pub struct FileKey {
@@ -78,8 +77,8 @@ impl FileKey {
 }
 
 impl EncryptedObjectStorage {
-    pub fn new(config: Arc<StorageConfig>, fs: Box<dyn ObjectStorage>) -> EncryptedObjectStorage {
-        EncryptedObjectStorage { config, fs }
+    pub fn new(config: Arc<StorageConfig>) -> EncryptedObjectStorage {
+        EncryptedObjectStorage { config }
     }
 
     pub fn generate_salt() -> [u8; SALT_LEN] {
@@ -158,113 +157,12 @@ impl EncryptedObjectStorage {
 
         Ok(plaintext)
     }
-
-    fn path(&self, original_path: &str, external_id: &str) -> String {
-        match self.config.path_generator {
-            PathGenerator::Path => original_path.to_string(),
-            PathGenerator::Sha512 => {
-                // Use the hash of the path instead of the content, since the content is encrypted and multiple files with the same content will collide with the same hash but different keys
-                let sha512 = hex::encode(hmac_sha512::Hash::hash(original_path.as_bytes()));
-                format!("{}.enc", &sha512[..32])
-            }
-            PathGenerator::ExternalId => format!("{}.enc", external_id),
-        }
-    }
-
-    fn add_to_keychain(keychain: &str, name: &str, key: &FileKey) -> String {
-        let key = format!("[{}]{}", name, key.serialize());
-
-        if keychain.is_empty() {
-            return key;
-        }
-
-        let parts: Vec<String> = keychain.split(',').map(|i| i.to_string()).collect();
-        let mut keys = vec![key];
-
-        for part in parts {
-            if part.starts_with("[") {
-                // Tagged key
-                let key_start = part.find("]").expect("Invalid keychain");
-                let key_name = &part[1..key_start];
-
-                if key_name != name {
-                    keys.push(part);
-                }
-            } else {
-                // Untagged key
-                keys.push(part);
-            }
-        }
-
-        keys.join(",")
-    }
-
-    fn get_keys_from_keychain(keychain: &str, name: &str) -> Result<Vec<FileKey>, Error> {
-        let parts: Vec<String> = keychain.split(',').map(|i| i.to_string()).collect();
-        let mut keys = vec![];
-
-        for part in parts {
-            if part.starts_with("[") {
-                // Tagged key
-                let key_start = part.find("]").ok_or_else(|| anyhow!("Invalid keychain"))?;
-                let key_name = &part[1..key_start];
-                let key_value = &part[key_start + 1..];
-
-                if key_name == name {
-                    keys.push(FileKey::deserialize(key_value)?);
-                }
-            } else {
-                // Untagged key
-                keys.push(FileKey::deserialize(&part)?);
-            }
-        }
-
-        Ok(keys)
-    }
 }
 
-impl ObjectStorage for EncryptedObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
-        let keys = Self::get_keys_from_keychain(&info.encryption_key, &self.config.name)?;
-
-        fn try_key(this: &mut EncryptedObjectStorage, info: &ObjInfo, key: FileKey) -> Result<Vec<u8>, Error> {
-            let mut info = info.clone();
-            info.full_path = this.path(&info.full_path, &info.external_id);
-
-            let bytes = this.fs.get(&info)?;
-            // Skip the first line, which contains a header with metadata
-            let start = bytes
-                .iter()
-                .find_position(|b| **b == b'\n')
-                .ok_or_else(|| anyhow!("Invalid encrypted file header"))?
-                .0
-                + 1;
-
-            EncryptedObjectStorage::decrypt(&this.config.encryption_key, &key, &bytes[start..])
-        }
-
-        let mut last_error = None;
-
-        for key in keys {
-            match try_key(self, info, key) {
-                Ok(bytes) => return Ok(bytes),
-                Err(e) => {
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow!("No valid key found")))
-    }
-
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
-        let (key, bytes) = Self::encrypt(&self.config.encryption_key, &content, &info.sha512)?;
-        let full_path = self.path(&info.full_path, &info.external_id);
-        let prev_path = info.full_path.clone();
-
-        // Hide real path, to avoid leaking information (only has effect if config.path_generator is Path)
-        info.full_path = full_path;
-        info.encryption_key = Self::add_to_keychain(&info.encryption_key, &self.config.name, &key);
+impl BlobProcessor for EncryptedObjectStorage {
+    fn on_store(&self, blob: Vec<u8>) -> Result<Vec<u8>, AnyError> {
+        let hash = fast_hash(&blob);
+        let (key, bytes) = Self::encrypt(&self.config.encryption_key, &blob, &hash)?;
 
         let prefix = format!(
             "$AES256GCM:{}:{}:{}$PBKDF2_HMAC:{}${}$\n",
@@ -278,47 +176,25 @@ impl ObjectStorage for EncryptedObjectStorage {
         final_bytes.extend_from_slice(prefix.as_bytes());
         final_bytes.extend_from_slice(bytes.as_slice());
 
-        self.fs.put(info, &final_bytes)?;
-        info.full_path = prev_path;
-        Ok(())
+        Ok(final_bytes)
     }
 
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), Error> {
-        let original_info = info.clone();
-        let mut info_copy = info.clone();
-        info_copy.full_path = self.path(&info_copy.full_path, &info_copy.external_id);
+    fn on_load(&self, blob: Vec<u8>) -> Result<Vec<u8>, AnyError> {
+        let Some((newline, _)) = blob.iter().find_position(|b| **b == b'\n') else {
+            return Err(anyhow!("Missing encrypted blob header"));
+        };
 
-        self.fs
-            .remove(&info_copy, Arc::new(move |_, pg| is_in_use(&original_info, pg)))?;
+        let header = String::from_utf8_lossy(&blob[..newline + 1]);
+        let content = &blob[newline + 1..];
 
-        Ok(())
-    }
-
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let prev_path = self.path(&prev_info.full_path, &prev_info.external_id);
-        let new_path = self.path(&new_info.full_path, &new_info.external_id);
-
-        if prev_path != new_path {
-            let mut prev_info = prev_info.clone();
-            let mut new_info = new_info.clone();
-
-            prev_info.full_path = prev_path;
-            new_info.full_path = new_path;
-
-            self.fs.rename(&prev_info, &new_info)?;
+        // Parse header
+        let parts: Vec<&str> = header.trim().split('$').collect();
+        if parts.len() < 3 {
+            return Err(anyhow!("Invalid encrypted blob header"));
         }
-        Ok(())
-    }
 
-    fn nuke(&mut self) -> Result<(), Error> {
-        self.fs.nuke()
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(Self {
-            config: self.config.clone(),
-            fs: self.fs.clone(),
-        })
+        let key = FileKey::deserialize(parts[2])?;
+        EncryptedObjectStorage::decrypt(&self.config.encryption_key, &key, content)
     }
 }
 
@@ -337,7 +213,7 @@ fn test_key_derivation() {
 fn test_encryption() {
     let password = "1234";
     let content = "Hello world".as_bytes();
-    let content_sha512 = hex::encode(hmac_sha512::Hash::hash(content));
+    let content_sha512 = crate::utils::slow_hash(content);
 
     let (file_key, ciphertext) = EncryptedObjectStorage::encrypt(&password, content, &content_sha512).unwrap();
     let serialized_file_key = file_key.serialize();

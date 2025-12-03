@@ -1,8 +1,7 @@
 [package]
 name = "InnerFS"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2021"
-
 
 [dependencies]
 sqlite = "0.36.1"
@@ -42,3 +41,7 @@ chrono = "0.4.39"
 mime_guess = "2.0.5"
 url = "2.5.2"
 percent-encoding = "2.3.1"
+rayon = "1.11.0"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+zstd = "0.13.3"
+minilzo = "0.2.0"

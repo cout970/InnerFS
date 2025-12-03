@@ -1,7 +1,7 @@
 use crate::fs_tree::{FsTree, FsTreeChild, FsTreeKind, FsTreeRef};
 use crate::semver::Semver;
 use crate::{AnyError, VERSION};
-use anyhow::{anyhow};
+use anyhow::anyhow;
 use itertools::Itertools;
 use log::info;
 use sqlite::{Bindable, State, Statement};
@@ -49,6 +49,26 @@ pub struct DirectoryEntry {
     pub name: String,
     pub kind: i64,
     pub external_id: String,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct BlobRow {
+    pub id: i64,
+    pub hash: String,
+    pub size: i64,
+    pub uses: i64,
+    pub content: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct FileBlobRow {
+    pub id: i64,
+    pub file_id: i64,
+    pub offset: i64,
+    pub blob_id: i64,
+    pub blob: Option<BlobRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +128,7 @@ impl MetadataDB {
         self.execute0(include_str!("./sql/file_changes.sql"))?;
         self.execute0(include_str!("./sql/sqlar.sql"))?;
         self.execute0(include_str!("./sql/external_file_changes.sql"))?;
+        self.execute0(include_str!("./sql/blobs.sql"))?;
 
         // Schema version
         let version =
@@ -713,10 +734,8 @@ impl MetadataDB {
     }
 
     pub fn get_last_file_change(&self) -> Result<Option<FileChange>, AnyError> {
-        let result = self.get_row(
-            "SELECT * FROM file_changes ORDER BY id DESC LIMIT 1",
-            NO_BINDINGS.as_ref(),
-            |row| {
+        let result =
+            self.get_row("SELECT * FROM file_changes ORDER BY id DESC LIMIT 1", NO_BINDINGS.as_ref(), |row| {
                 Ok(FileChange {
                     id: row.read("id")?,
                     file_id: row.read("file_id")?,
@@ -726,8 +745,7 @@ impl MetadataDB {
                     file_hash: row.read("file_hash")?,
                     changed_at: row.read("changed_at")?,
                 })
-            },
-        )?;
+            })?;
         Ok(result)
     }
 
@@ -751,8 +769,11 @@ impl MetadataDB {
 
     pub fn get_tree(&self) -> Result<FsTreeRef, AnyError> {
         #[allow(clippy::unnecessary_cast)]
-        let entries: Vec<DirectoryEntry> =
-            self.get_rows("SELECT * FROM directory_entries", NO_BINDINGS.as_ref(), Self::directory_entry_from_statement)?;
+        let entries: Vec<DirectoryEntry> = self.get_rows(
+            "SELECT * FROM directory_entries",
+            NO_BINDINGS.as_ref(),
+            Self::directory_entry_from_statement,
+        )?;
 
         // In memory index of directory entries
         let mut children: HashMap<i64, Vec<DirectoryEntry>> = HashMap::new();
@@ -895,6 +916,122 @@ impl MetadataDB {
         Ok(())
     }
 
+    pub fn get_file_blobs_by_file(&self, file_id: i64) -> Result<Vec<FileBlobRow>, AnyError> {
+        self.get_rows(
+            "SELECT f.id, f.file_id, f.offset, f.blob_id, b.hash, b.size, b.uses FROM file_blobs f inner join blobs b ON b.id = f.blob_id WHERE f.file_id = :file_id order by f.offset asc",
+            (":file_id", file_id), |row| {
+                Ok(FileBlobRow {
+                    id: row.read("id")?,
+                    file_id: row.read("file_id")?,
+                    offset: row.read("offset")?,
+                    blob_id: row.read("blob_id")?,
+                    blob: Some(BlobRow {
+                        id: row.read("blob_id")?,
+                        hash: row.read("hash")?,
+                        size: row.read("size")?,
+                        uses: row.read("uses")?,
+                        content: None,
+                    }),
+                })
+            })
+    }
+
+    pub fn get_existing_blobs(&self, partial_blobs: &[BlobRow]) -> Result<Vec<BlobRow>, AnyError> {
+        if partial_blobs.is_empty() {
+            return Ok(vec![]);
+        }
+        let filter = partial_blobs.iter().map(|_| "(?, ?)").join(",");
+        let mut params = vec![];
+        for b in partial_blobs {
+            params.push(b.hash.to_string());
+            params.push(b.size.to_string());
+        }
+        self.get_rows(
+            &format!("SELECT id, hash, size, uses FROM blobs WHERE (hash, size) in ({})", filter),
+            params.iter().map(|i| i.as_str()).collect::<Vec<&str>>().as_slice(),
+            |row| {
+                Ok(BlobRow {
+                    id: row.read("id")?,
+                    hash: row.read("hash")?,
+                    size: row.read("size")?,
+                    uses: row.read("uses")?,
+                    content: None,
+                })
+            },
+        )
+    }
+
+    pub fn add_blobs(&self, blobs: &[BlobRow]) -> Result<Vec<i64>, AnyError> {
+        let mut added = vec![];
+        for b in blobs {
+            self.execute2(
+                "INSERT INTO blobs (hash, size, uses) VALUES (:hash, :size, 0)",
+                (":hash", b.hash.as_str()),
+                (":size", b.size),
+            )?;
+            let id = self.get_last_inserted_row_id()?;
+            added.push(id);
+        }
+        Ok(added)
+    }
+
+    pub fn increment_blob_uses(&self, blobs: &[i64]) -> Result<(), AnyError> {
+        self.execute1(
+            &format!("UPDATE blobs SET uses = uses + 1 WHERE id in ({})", blobs.iter().map(|_| "?").join(",")),
+            blobs,
+        )
+    }
+
+    pub fn replace_file_blobs(&self, file_id: i64, file_blobs: &[FileBlobRow]) -> Result<(), AnyError> {
+        // Decrement uses for existing blobs linked to this file
+        self.execute1(
+            "
+            UPDATE blobs
+            SET uses = uses - 1
+            WHERE id IN (
+                SELECT b.id
+                FROM blobs b
+                    INNER JOIN file_blobs f ON b.id = f.blob_id
+                WHERE f.file_id = :file_id)",
+            (":file_id", file_id),
+        )?;
+
+        // Delete link from file to blobs
+        self.execute1("DELETE FROM file_blobs WHERE file_id = :file_id", (":file_id", file_id))?;
+
+        // Insert new links
+        for fb in file_blobs {
+            self.execute3(
+                "INSERT INTO file_blobs (file_id, offset, blob_id) VALUES (:file_id, :offset, :blob_id)",
+                (":file_id", file_id),
+                (":offset", fb.offset),
+                (":blob_id", fb.blob_id),
+            )?;
+            self.execute1(
+                "UPDATE blobs SET uses = uses + 1 WHERE id = :blob_id", (":blob_id", fb.blob_id),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_unused_blobs(&self) -> Result<Vec<BlobRow>, AnyError> {
+        self.get_rows("SELECT id, hash, size, uses FROM blobs WHERE uses <= 0", NO_BINDINGS.as_ref(), |row| {
+            Ok(BlobRow {
+                id: row.read("id")?,
+                hash: row.read("hash")?,
+                size: row.read("size")?,
+                uses: row.read("uses")?,
+                content: None,
+            })
+        })
+    }
+
+    pub fn remove_unused_blobs(&self) -> Result<(), AnyError> {
+        self.execute0("DELETE FROM blobs WHERE uses <= 0")?;
+        Ok(())
+    }
+
     pub fn nuke(&self) -> Result<(), AnyError> {
         self.execute0("DELETE FROM directory_entries")?;
         self.execute0("DELETE FROM sqlite_sequence WHERE name = 'directory_entries';")?;
@@ -952,14 +1089,21 @@ impl MetadataDB {
 
     pub fn execute0(&self, query: &str) -> Result<(), AnyError> {
         let connection = self.connection.lock().expect("Unable to lock connection");
-        let mut statement = connection
-            .prepare(query)
-            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
-        while statement
-            .next()
-            .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
-            != State::Done
-        {}
+
+        for line in query.split(";") {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let mut statement = connection
+                .prepare(line)
+                .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?;
+            while statement
+                .next()
+                .map_err(|e| anyhow!("Failed to execute sql \"{}\": {}", query, e))?
+                != State::Done
+            {}
+        }
         Ok(())
     }
 

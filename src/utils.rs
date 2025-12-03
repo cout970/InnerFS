@@ -2,6 +2,15 @@ use chrono::DateTime;
 use std::ops::{Add, Sub};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub fn slow_hash(bytes: &[u8]) -> String {
+    hex::encode(hmac_sha512::Hash::hash(bytes))
+}
+
+pub fn fast_hash(bytes: &[u8]) -> String {
+    let hash = xxhash_rust::xxh3::xxh3_64(&bytes);
+    hex::encode(hash.to_be_bytes())
+}
+
 pub fn humanize_bytes_binary(value: usize) -> String {
     use ::core::fmt::Write;
     let mut num_bytes = value as f64;

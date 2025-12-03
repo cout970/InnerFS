@@ -1,37 +1,27 @@
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::{BlobStorage, RemoteBlob};
 use crate::AnyError;
 use log::info;
 
-pub struct DebugObjectStorage {}
+pub struct DebugBackend {}
 
-impl ObjectStorage for DebugObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
-        info!("Get: {}", info);
-        Ok(vec![])
+impl BlobStorage for DebugBackend {
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError> {
+        info!("Get multiple: {:?}", paths);
+        Ok(vec![vec![]; paths.len()])
     }
 
-    fn put(&mut self, info: &mut ObjInfo, _content: &[u8]) -> Result<(), AnyError> {
-        info!("Put: {}", info);
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError> {
+        info!("Put multiple: {:?}", blobs);
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo, _is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        info!("Remove: {}", info);
-        Ok(())
-    }
-
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        info!("Rename: {} to {}", prev_info, new_info);
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError> {
+        info!("Remove multiple: {:?}", paths);
         Ok(())
     }
 
     fn nuke(&mut self) -> Result<(), AnyError> {
         info!("Nuke");
         Ok(())
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(DebugObjectStorage {})
     }
 }

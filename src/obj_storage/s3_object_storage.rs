@@ -1,6 +1,5 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::{BlobStorage, RemoteBlob};
 use crate::AnyError;
 use anyhow::{anyhow, Error};
 use aws_sdk_s3::config::{Credentials, SharedCredentialsProvider};
@@ -12,14 +11,15 @@ use aws_types::region::Region;
 use log::debug;
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
+use tokio::task::JoinHandle;
 
-pub struct S3ObjectStorage {
+pub struct S3Backend {
     pub config: Arc<StorageConfig>,
     pub client: Client,
     pub rt: Runtime,
 }
 
-impl S3ObjectStorage {
+impl S3Backend {
     pub fn new(config: Arc<StorageConfig>) -> Self {
         let rt = Builder::new_current_thread().enable_time().enable_io().build().unwrap();
 
@@ -34,98 +34,135 @@ impl S3ObjectStorage {
 
         let client = Client::new(&s3_config);
 
-        S3ObjectStorage { config, client, rt }
+        S3Backend { config, client, rt }
     }
 
-    pub fn path(&self, info: &ObjInfo) -> String {
-        let path = self.config.path_of(&info);
+    pub fn final_path(&self, path: &str) -> String {
         let basename = self.config.s3_base_path.trim_end_matches('/');
         let filename = path.trim_start_matches('/');
         format!("{}/{}", basename, filename).trim_matches('/').to_string()
     }
 }
 
-impl ObjectStorage for S3ObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, Error> {
-        let path = self.path(info);
+impl BlobStorage for S3Backend {
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError> {
         let bucket_name = &self.config.s3_bucket;
-        debug!("Get: {:?} ({:?})", &path, bucket_name);
+        let paths = paths.iter().map(|p| self.final_path(p)).collect::<Vec<_>>();
+        let client = &mut self.client;
+        let rt = &mut self.rt;
 
-        self.rt.block_on(async {
-            let res = self.client.get_object().bucket(bucket_name).key(&path).send().await?;
+        rt.block_on(async {
+            let mut handles: Vec<JoinHandle<Result<Vec<u8>, AnyError>>> = vec![];
 
-            let content = res.body.collect().await?.to_vec();
-            Ok(content)
+            // Get all objects in parallel
+            for path in paths {
+                let bucket_name = bucket_name.clone();
+                let client = client.clone();
+
+                debug!("Get: {:?} ({:?})", &path, bucket_name);
+                let h = rt.spawn(async move {
+                    let res = client.get_object().bucket(bucket_name).key(&path).send().await?;
+                    let content = res.body.collect().await?.to_vec();
+                    Ok(content)
+                });
+                handles.push(h);
+            }
+
+            // Wait for all tasks to finish
+            let mut results = vec![];
+            for handle in handles {
+                match handle.await {
+                    Ok(result) => results.push(result?),
+                    Err(e) => return Err(anyhow!("Failed to get object: {:?}", e).into()),
+                }
+            }
+
+            Ok(results)
         })
     }
 
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), Error> {
-        let path = self.path(info);
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError> {
         let bucket_name = &self.config.s3_bucket;
-        debug!("Put: {:?} ({:?})", &path, bucket_name);
+        let mut final_paths = vec![];
 
-        self.rt.block_on(async {
-            self.client
-                .put_object()
-                .bucket(bucket_name)
-                .key(&path)
-                .body(ByteStream::from(content.to_vec()))
-                .send()
-                .await?;
-
-            Ok(())
-        })
-    }
-
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), Error> {
-        // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, self.config.path_generator)? {
-            return Ok(());
+        for blob in blobs {
+            final_paths.push(self.final_path(&blob.path));
         }
 
-        let path = self.path(info);
-        let bucket_name = &self.config.s3_bucket;
-        debug!("Remove: {:?} ({:?})", &path, bucket_name);
+        let client = &mut self.client;
+        let rt = &mut self.rt;
 
-        self.rt.block_on(async {
-            self.client
-                .delete_object()
-                .bucket(bucket_name)
-                .key(&path)
-                .send()
-                .await?;
+        rt.block_on(async {
+            let mut handles: Vec<JoinHandle<Result<(), AnyError>>> = vec![];
 
-            Ok(())
-        })
-    }
+            // Get all objects in parallel
+            for i in 0..blobs.len() {
+                let bucket_name = bucket_name.clone();
+                let client = client.clone();
+                let path = final_paths[i].clone();
+                let content = blobs[i].contents.to_vec();
 
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let prev_path = self.path(prev_info);
-        let new_path = self.path(new_info);
-        let bucket_name = &self.config.s3_bucket;
-        debug!("Rename: {:?} -> {:?} ({:?})", &prev_path, &new_path, bucket_name);
+                debug!("Put: {:?} ({:?})", &path, bucket_name);
+                let h = rt.spawn(async move {
+                    client
+                        .put_object()
+                        .bucket(bucket_name)
+                        .key(&path)
+                        .body(ByteStream::from(content))
+                        .send()
+                        .await?;
 
-        self.rt.block_on(async {
-            self.client
-                .copy_object()
-                .bucket(bucket_name)
-                .copy_source(format!("{}/{}", bucket_name, prev_path))
-                .key(&new_path)
-                .send()
-                .await?;
+                    Ok(())
+                });
+                handles.push(h);
+            }
 
-            self.client
-                .delete_object()
-                .bucket(bucket_name)
-                .key(&prev_path)
-                .send()
-                .await?;
+            // Wait for all tasks to finish
+            for handle in handles {
+                if let Err(e) = handle.await {
+                    return Err(anyhow!("Failed to pet object: {:?}", e).into());
+                }
+            }
 
             Ok(())
         })
     }
 
-    fn nuke(&mut self) -> Result<(), Error> {
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError> {
+        let bucket_name = &self.config.s3_bucket;
+        let paths = paths.iter().map(|p| self.final_path(p)).collect::<Vec<_>>();
+        let client = &mut self.client;
+        let rt = &mut self.rt;
+
+        rt.block_on(async {
+            let mut handles: Vec<JoinHandle<Result<(), AnyError>>> = vec![];
+
+            // Get all objects in parallel
+            for path in paths {
+                let bucket_name = bucket_name.clone();
+                let client = client.clone();
+
+                debug!("Remove: {:?} ({:?})", &path, bucket_name);
+                let h = rt.spawn(async move {
+                    client.delete_object().bucket(bucket_name).key(&path).send().await?;
+
+                    Ok(())
+                });
+                handles.push(h);
+            }
+
+            // Wait for all tasks to finish
+            for handle in handles {
+                if let Err(e) = handle.await {
+                    return Err(anyhow!("Failed to pet object: {:?}", e).into());
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    fn nuke(&mut self) -> Result<(), AnyError> {
         let path = self.config.s3_base_path.trim_matches('/').to_string();
         let bucket_name = &self.config.s3_bucket;
         debug!("Nuke: {:?} ({:?})", &path, bucket_name);
@@ -180,9 +217,5 @@ impl ObjectStorage for S3ObjectStorage {
             delete_objects(&self.client, &bucket_name, &path).await?;
             Ok(())
         })
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(Self::new(self.config.clone()))
     }
 }

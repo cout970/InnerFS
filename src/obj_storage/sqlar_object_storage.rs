@@ -1,16 +1,12 @@
-use crate::config::StorageConfig;
 use crate::metadata_db::MetadataDB;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::{BlobStorage, RemoteBlob};
 use crate::AnyError;
 use log::debug;
-use std::sync::Arc;
-use crate::utils::humanize_bytes_binary;
+use crate::utils::{current_timestamp, humanize_bytes_binary};
 
 #[derive(Clone)]
-pub struct SqlarObjectStorage {
+pub struct SqlarBackend {
     pub sql: MetadataDB,
-    pub config: Arc<StorageConfig>,
 }
 
 // https://sqlite.org/sqlar.html
@@ -30,69 +26,7 @@ pub struct SqlarFile {
     pub data: Vec<u8>,
 }
 
-impl ObjectStorage for SqlarObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
-        debug!("Get: {}", info);
-        let name = self.path(&info);
-        let file = self.get_sqlar_file(&name)?;
-        if file.is_none() {
-            return Err(anyhow::anyhow!("File not found ({})", info.name));
-        }
-        Ok(file.unwrap().data)
-    }
-
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
-        let name = self.path(&info);
-        debug!("Put: {} ({})", name, humanize_bytes_binary(content.len()));
-
-        let file = SqlarFile {
-            name: name.clone(),
-            mode: info.mode as i64,
-            mtime: info.updated_at,
-            sz: info.size as i64,
-            data: content.to_vec(),
-        };
-        self.set_sqlar_file(&name, &file)?;
-        Ok(())
-    }
-
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, self.config.path_generator)? {
-            return Ok(());
-        }
-
-        let name = self.path(&info);
-        debug!("Remove: {}", name);
-
-        self.remove_sqlar_file(&name)?;
-        Ok(())
-    }
-
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let prev_name = self.path(&prev_info);
-        let new_name = self.path(&new_info);
-        debug!("Rename: {} -> {}", prev_name, new_name);
-
-        self.rename_sqlar_file(&prev_name, &new_name)?;
-        Ok(())
-    }
-
-    fn nuke(&mut self) -> Result<(), AnyError> {
-        debug!("Nuke");
-        self.sql.execute0("DELETE FROM sqlar")?;
-        Ok(())
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(Self {
-            sql: self.sql.clone(),
-            config: self.config.clone(),
-        })
-    }
-}
-
-impl SqlarObjectStorage {
+impl SqlarBackend {
     pub fn get_sqlar_file(&mut self, name: &str) -> Result<Option<SqlarFile>, AnyError> {
         self.sql
             .get_row("SELECT mode, mtime, sz, data FROM sqlar WHERE name = :name", (":name", name), |row| {
@@ -118,22 +52,55 @@ impl SqlarObjectStorage {
         Ok(())
     }
 
-    pub fn rename_sqlar_file(&mut self, prev_name: &str, new_name: &str) -> Result<(), AnyError> {
-        self.sql.execute2(
-            "UPDATE sqlar SET name = :new_name WHERE name = :prev_name",
-            (":new_name", new_name),
-            (":prev_name", prev_name),
-        )?;
-        Ok(())
-    }
-
     pub fn remove_sqlar_file(&mut self, name: &str) -> Result<(), AnyError> {
         self.sql
             .execute1("DELETE FROM sqlar WHERE name = :name", (":name", name))?;
         Ok(())
     }
+}
 
-    pub fn path(&self, info: &ObjInfo) -> String {
-        self.config.path_of(&info)
+impl BlobStorage for SqlarBackend {
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError> {
+        let mut result = Vec::with_capacity(paths.len());
+        for path in paths {
+            let file = self.get_sqlar_file(path)?;
+            if file.is_none() {
+                return Err(anyhow::anyhow!("File not found ({})", path));
+            }
+            result.push(file.unwrap().data);
+        }
+        Ok(result)
+    }
+
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError> {
+        for blob in blobs {
+            let name = blob.path.to_string();
+            debug!("Put: {} ({})", name, humanize_bytes_binary(blob.contents.len()));
+
+            let file = SqlarFile {
+                name: name.clone(),
+                mode: 0o777,
+                mtime: current_timestamp(),
+                sz: blob.contents.len() as i64,
+                data: blob.contents.to_vec(),
+            };
+            self.set_sqlar_file(&name, &file)?;
+        }
+        Ok(())
+    }
+
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError> {
+        for path in paths {
+            let name = path.to_string();
+            debug!("Remove: {}", name);
+            self.remove_sqlar_file(&name)?;
+        }
+        Ok(())
+    }
+
+    fn nuke(&mut self) -> Result<(), AnyError> {
+        debug!("Nuke");
+        self.sql.execute0("DELETE FROM sqlar")?;
+        Ok(())
     }
 }

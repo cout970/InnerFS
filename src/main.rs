@@ -1,7 +1,7 @@
 use crate::config::{check_config_changes, read_config, Config};
 use crate::fuse_file_system::FuseFileSystem;
 use crate::metadata_db::{MetadataDB, NO_BINDINGS};
-use crate::obj_storage::{create_object_storage, ObjectStorage};
+use crate::obj_storage::{create_object_storage, BlobProcessor};
 use anyhow::{anyhow, Context};
 use env_logger::Env;
 use fs::File;
@@ -15,24 +15,27 @@ use std::sync::Arc;
 use std::{env, fs, thread};
 
 mod api;
+mod chunking;
 mod cli;
 mod config;
 mod fs_tree;
 mod fuse_file_system;
+mod inner_file_system;
 mod metadata_db;
 mod obj_storage;
 mod semver;
-mod inner_file_system;
 mod storage_interface;
 mod utils;
 
 use crate::api::{connect_to_sync_server, start_sync_server, start_webdav_server};
 use crate::cli::{Cli, Commands, FileExportFormat, IndexExportFormat};
 use crate::fs_tree::{FsTree, FsTreeKind};
-use crate::obj_storage::replicated_object_storage::ReplicatedObjectStorage;
 use crate::inner_file_system::InnerFileSystem;
+use crate::obj_storage::compressed_object_storage::CompressedObjectStorage;
+use crate::obj_storage::encrypted_object_storage::EncryptedObjectStorage;
+use crate::obj_storage::replicated_object_storage::ReplicatedStorage;
 use crate::storage_interface::StorageInterface;
-use crate::utils::humanize_bytes_binary;
+use crate::utils::{humanize_bytes_binary, slow_hash};
 use clap::Parser;
 use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
@@ -137,25 +140,43 @@ fn init_fs(config: Arc<Config>) -> InnerFileSystem {
     let sql = MetadataDB::open(&config.database_file);
     sql.run_migrations().expect("Unable to run migrations");
 
-    // Select the appropriate storage backend
-    let mut obj_storage: Box<dyn ObjectStorage> = create_object_storage(config.primary.clone(), &sql);
+    let mut blob_storage = ReplicatedStorage {
+        primary: create_object_storage(config.primary.clone(), &sql),
+        primary_processors: vec![],
+        replicas: vec![],
+        replica_processors: vec![],
+    };
+
+    if config.primary.compression_level > 0 {
+        blob_storage.primary_processors.push(Box::new(CompressedObjectStorage::new(config.primary.clone())));
+    }
+
+    if !config.primary.encryption_key.is_empty() {
+        blob_storage.primary_processors.push(Box::new(EncryptedObjectStorage::new(config.primary.clone())));
+    }
 
     // Add replicas
     if !config.replicas.is_empty() {
-        let mut rep = ReplicatedObjectStorage {
-            primary: obj_storage,
-            replicas: vec![],
-        };
-
         for replica in &config.replicas {
-            rep.replicas.push(create_object_storage(replica.clone(), &sql));
-        }
+            blob_storage.replicas.push(create_object_storage(replica.clone(), &sql));
 
-        obj_storage = Box::new(rep);
+            let mut processors: Vec<Box<dyn BlobProcessor>> = vec![];
+
+            if config.primary.compression_level > 0 {
+                processors.push(Box::new(CompressedObjectStorage::new(replica.clone())));
+            }
+
+            if !config.primary.encryption_key.is_empty() {
+                processors.push(Box::new(EncryptedObjectStorage::new(replica.clone())));
+            }
+
+            blob_storage.replica_processors.push(processors);
+        }
     }
 
+
     // Wrap the storage backend in a StorageInterface, which provides a higher-level API
-    let storage = StorageInterface::new(obj_storage);
+    let storage = StorageInterface::new(blob_storage, sql.clone());
 
     InnerFileSystem::new(sql, config, storage)
 }
@@ -184,8 +205,12 @@ fn mount(fs: InnerFileSystem) -> Result<(), AnyError> {
     let _ = Command::new("umount").arg(&mount_point).status();
 
     // Check if the mount point exists and is a directory
-    let stat = fs::metadata(&mount_point).expect("Mount point does not exist");
-    if !stat.is_dir() {
+    let stat = fs::metadata(&mount_point);
+    if let Err(e) = stat {
+        error!("Unable to inspect mount point: {}", e);
+        return Ok(())
+    }
+    if !stat?.is_dir() {
         panic!("Mount point is not a directory");
     }
 
@@ -472,7 +497,7 @@ fn verify(mut fs: InnerFileSystem) -> Result<(), AnyError> {
         }
 
         if data.len() != 0 || !child.sha512.is_empty() {
-            let sha512 = hex::encode(hmac_sha512::Hash::hash(&data));
+            let sha512 = slow_hash(&data);
 
             if sha512 != child.sha512 {
                 return Err(anyhow!(

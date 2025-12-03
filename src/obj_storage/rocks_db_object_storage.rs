@@ -1,75 +1,46 @@
 use crate::config::StorageConfig;
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage_interface::ObjInUseFn;
+use crate::obj_storage::{BlobStorage, RemoteBlob};
 use crate::AnyError;
 use log::debug;
 use rocksdb::{DBWithThreadMode, Options, SingleThreaded, DB};
 use std::sync::Arc;
 
-pub struct RocksDbObjectStorage {
+pub struct RocksDbBackend {
     db: DBWithThreadMode<SingleThreaded>,
-    config: Arc<StorageConfig>,
 }
 
-impl RocksDbObjectStorage {
-    pub fn new(config: Arc<StorageConfig>) -> RocksDbObjectStorage {
+impl RocksDbBackend {
+    pub fn new(config: Arc<StorageConfig>) -> RocksDbBackend {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         let db = DB::open_cf(&opts, &config.blob_storage, ["default"]).unwrap();
-        RocksDbObjectStorage { db, config }
-    }
-
-    pub fn path(&self, info: &ObjInfo) -> String {
-        self.config.path_of(info)
+        RocksDbBackend { db }
     }
 }
 
-impl ObjectStorage for RocksDbObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
-        let path = self.path(info);
-        debug!("Get: {:?}", &path);
-
-        match self.db.get(&path)? {
-            Some(v) => Ok(v.to_vec()),
-            None => Err(AnyError::msg("Object not found")),
+impl BlobStorage for RocksDbBackend {
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError> {
+        let mut blobs = Vec::new();
+        for path in paths {
+            match self.db.get(path)? {
+                Some(v) => blobs.push(v.to_vec()),
+                None => blobs.push(vec![]),
+            }
         }
+        Ok(blobs)
     }
 
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
-        let path = self.path(info);
-        debug!("Put: {:?}", &path);
-
-        self.db.put(&path, content)?;
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError> {
+        for blob in blobs {
+            self.db.put(&blob.path, &blob.contents)?;
+        }
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        let path = self.path(info);
-
-        // If is object in use by other file (deduplication), do not remove it
-        if is_in_use(info, self.config.path_generator)? {
-            return Ok(());
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError> {
+        for path in paths {
+            self.db.delete(path)?;
         }
-
-        debug!("Remove: {:?}", &path);
-
-        self.db.delete(&path)?;
-        Ok(())
-    }
-
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        let prev_path = self.path(prev_info);
-        let new_path = self.path(new_info);
-
-        if prev_path == new_path {
-            return Ok(());
-        }
-
-        debug!("Rename: {:?} -> {:?}", &prev_path, &new_path);
-
-        let content = self.db.get(&prev_path)?.unwrap();
-        self.db.put(&new_path, &content)?;
-        self.db.delete(&prev_path)?;
         Ok(())
     }
 
@@ -77,9 +48,5 @@ impl ObjectStorage for RocksDbObjectStorage {
         debug!("Nuke");
         self.db.drop_cf("default")?;
         Ok(())
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(Self::new(self.config.clone()))
     }
 }

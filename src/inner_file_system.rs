@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::metadata_db::{DirectoryEntry, FileChangeKind, FileRow, MetadataDB, FILE_KIND_DIRECTORY, FILE_KIND_REGULAR};
-use crate::obj_storage::{ObjInfo, PathGenerator};
+use crate::obj_storage::{ObjInfo};
 use crate::storage_interface::StorageInterface;
 use crate::utils::current_timestamp;
 use crate::AnyError;
@@ -789,10 +789,7 @@ impl InnerFileSystem {
     }
 
     pub fn cleanup(&mut self) -> Result<(), InnerFileSystemError> {
-        let sql = self.sql.clone();
-        let removed = self
-            .storage
-            .cleanup(Arc::new(move |info, test| Self::file_is_in_use(&sql, info, test)))?;
+        let removed = self.storage.cleanup()?;
 
         if self.config.store_file_change_history {
             for (id, external_id) in removed {
@@ -802,15 +799,6 @@ impl InnerFileSystem {
         }
 
         Ok(())
-    }
-
-    fn file_is_in_use(sql: &MetadataDB, info: &ObjInfo, test: PathGenerator) -> Result<bool, AnyError> {
-        let exists = match test {
-            PathGenerator::Path => sql.get_file_by_path(&info.full_path)?.is_some(),
-            PathGenerator::Sha512 => sql.get_file_by_sha512(&info.sha512)?.is_some(),
-            PathGenerator::ExternalId => sql.get_file(info.id)?.is_some(),
-        };
-        Ok(exists)
     }
 
     pub fn get_file_or_err(&mut self, id: i64) -> Result<FileRow, InnerFileSystemError> {
@@ -850,15 +838,6 @@ impl InnerFileSystem {
             self.sql.execute0("ROLLBACK").context("Database error")?;
         }
         res
-    }
-
-    #[allow(dead_code)]
-    pub fn clone(&self) -> Self {
-        Self {
-            sql: self.sql.clone(),
-            config: self.config.clone(),
-            storage: self.storage.clone(),
-        }
     }
 }
 

@@ -1,37 +1,69 @@
-use crate::obj_storage::{ObjInfo, ObjectStorage};
-use crate::storage_interface::ObjInUseFn;
+use rayon::prelude::*;
+use crate::obj_storage::{BlobProcessor, BlobStorage, RemoteBlob};
 use crate::AnyError;
 
-pub struct ReplicatedObjectStorage {
-    pub primary: Box<dyn ObjectStorage>,
-    pub replicas: Vec<Box<dyn ObjectStorage>>,
+pub struct ReplicatedStorage {
+    pub primary: Box<dyn BlobStorage>,
+    pub primary_processors: Vec<Box<dyn BlobProcessor>>,
+    pub replicas: Vec<Box<dyn BlobStorage>>,
+    pub replica_processors: Vec<Vec<Box<dyn BlobProcessor>>>,
 }
 
-impl ObjectStorage for ReplicatedObjectStorage {
-    fn get(&mut self, info: &ObjInfo) -> Result<Vec<u8>, AnyError> {
-        self.primary.get(info)
+impl BlobStorage for ReplicatedStorage {
+    fn get_multiple(&mut self, paths: &[&str]) -> Result<Vec<Vec<u8>>, AnyError> {
+        let mut remote_blobs = self.primary.get_multiple(paths)?;
+
+        for processor in &self.primary_processors {
+            remote_blobs = remote_blobs
+                .into_iter()
+                .map(|b| processor.on_load(b))
+                .collect::<Result<Vec<_>, AnyError>>()?;
+        }
+
+        Ok(remote_blobs)
     }
 
-    fn put(&mut self, info: &mut ObjInfo, content: &[u8]) -> Result<(), AnyError> {
-        self.primary.put(info, content)?;
-        for replica in &mut self.replicas {
-            replica.put(info, content)?;
+    fn put_multiple(&mut self, blobs: &[RemoteBlob]) -> Result<(), AnyError> {
+        let mut remote_blobs = blobs.to_vec();
+
+        for processor in &self.primary_processors {
+            remote_blobs = remote_blobs
+                .into_par_iter()
+                .map(|b| {
+                    Ok(RemoteBlob {
+                        path: b.path,
+                        contents: processor.on_store(b.contents)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, AnyError>>()?;
+        }
+
+        self.primary.put_multiple(&remote_blobs)?;
+
+        for (index, replica) in  self.replicas.iter_mut().enumerate() {
+            let mut remote_blobs = blobs.to_vec();
+
+            for processor in &self.replica_processors[index] {
+                remote_blobs = remote_blobs
+                    .into_par_iter()
+                    .map(|b| {
+                        Ok(RemoteBlob {
+                            path: b.path,
+                            contents: processor.on_store(b.contents)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, AnyError>>()?;
+            }
+
+            replica.put_multiple(&remote_blobs)?;
         }
         Ok(())
     }
 
-    fn remove(&mut self, info: &ObjInfo, is_in_use: ObjInUseFn) -> Result<(), AnyError> {
-        self.primary.remove(info, is_in_use.clone())?;
+    fn remove_multiple(&mut self, paths: &[&str]) -> Result<(), AnyError> {
+        self.primary.remove_multiple(paths)?;
         for replica in &mut self.replicas {
-            replica.remove(info, is_in_use.clone())?;
-        }
-        Ok(())
-    }
-
-    fn rename(&mut self, prev_info: &ObjInfo, new_info: &ObjInfo) -> Result<(), AnyError> {
-        self.primary.rename(prev_info, new_info)?;
-        for replica in &mut self.replicas {
-            replica.rename(prev_info, new_info)?;
+            replica.remove_multiple(paths)?;
         }
         Ok(())
     }
@@ -42,12 +74,5 @@ impl ObjectStorage for ReplicatedObjectStorage {
             replica.nuke()?;
         }
         Ok(())
-    }
-
-    fn clone(&self) -> Box<dyn ObjectStorage> {
-        Box::new(Self {
-            primary: self.primary.clone(),
-            replicas: self.replicas.iter().map(|r| r.as_ref().clone()).collect(),
-        })
     }
 }

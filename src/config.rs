@@ -1,5 +1,4 @@
 use crate::metadata_db::MetadataDB;
-use crate::obj_storage::{ObjInfo, PathGenerator};
 use crate::utils::ask_for_confirmation;
 use crate::AnyError;
 use anyhow::{anyhow, Error};
@@ -30,8 +29,8 @@ struct YamlConfig {
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
     encryption_key: Option<YamlEncryptionKeyConfig>,
-    compression_level: Option<u32>,
-    use_versioning: Option<bool>,
+    compression_level: Option<i32>,
+    compression_algorithm: Option<CompressionAlgorithm>,
     webdav: Option<YamlWebdavConfig>,
     sync: Option<YamlSyncConfig>,
 }
@@ -48,10 +47,8 @@ pub struct YamlStorageConfig {
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
     encryption_key: Option<YamlEncryptionKeyConfig>,
-    compression_level: Option<u32>,
-    use_hash_as_filename: Option<bool>,
-    use_id_as_filename: Option<bool>,
-    use_versioning: Option<bool>,
+    compression_level: Option<i32>,
+    compression_algorithm: Option<CompressionAlgorithm>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -61,6 +58,15 @@ pub enum YamlEncryptionKeyConfig {
     External { path: String },
     Env { env: String },
     Ask { ask: bool },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CompressionAlgorithm {
+    Gzip,
+    ZStd,
+    #[default]
+    Lzo,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -103,7 +109,7 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
-    pub name: String,
+    #[allow(dead_code)] pub name: String,
     pub storage_backend: StorageOption,
     pub blob_storage: String,
     pub s3_endpoint_url: String,
@@ -113,9 +119,8 @@ pub struct StorageConfig {
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub encryption_key: String,
-    pub compression_level: u32,
-    pub use_versioning: bool,
-    pub path_generator: PathGenerator,
+    pub compression_level: i32,
+    pub compression_algorithm: CompressionAlgorithm,
 }
 
 #[derive(Debug, Clone)]
@@ -159,15 +164,6 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
     // Fields in the global config are the defaults for primary and replicas
     let primary_clone = config.primary.clone();
     let primary = primary_clone.as_ref();
-    let mut path_generation = PathGenerator::Path;
-
-    if let Some(p) = primary.clone() {
-        if p.use_id_as_filename.unwrap_or(false) {
-            path_generation = PathGenerator::ExternalId;
-        } else if p.use_hash_as_filename.unwrap_or(false) {
-            path_generation = PathGenerator::Sha512;
-        }
-    }
 
     let primary = Arc::new(StorageConfig {
         name: primary.and_then(|p| p.name.clone()).unwrap_or("primary".to_string()),
@@ -212,13 +208,11 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
         compression_level: primary
             .and_then(|p| p.compression_level.clone())
             .or(config.compression_level.clone())
-            .unwrap_or(0)
-            .clamp(0, 9),
-        use_versioning: primary
-            .and_then(|p| p.use_versioning.clone())
-            .or(config.use_versioning.clone())
-            .unwrap_or(false),
-        path_generator: path_generation,
+            .unwrap_or(0),
+        compression_algorithm: primary
+            .and_then(|p| p.compression_algorithm.clone())
+            .or(config.compression_algorithm.clone())
+            .unwrap_or_default(),
     });
 
     let yaml_webdav = config.webdav.clone().unwrap_or_default();
@@ -259,13 +253,6 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
     let replicas = config.replicas.clone().unwrap_or_default();
     let mut index = 0;
     for replica in &replicas {
-        let mut path_generation = PathGenerator::Path;
-
-        if replica.use_id_as_filename.unwrap_or(false) {
-            path_generation = PathGenerator::ExternalId;
-        } else if replica.use_hash_as_filename.unwrap_or(false) {
-            path_generation = PathGenerator::Sha512;
-        }
 
         cfg.replicas.push(Arc::new(StorageConfig {
             name: replica.name.clone().unwrap_or(format!("replica{}", index)),
@@ -317,14 +304,12 @@ pub fn read_config(config_path: &PathBuf) -> Result<Arc<Config>, Error> {
                 .compression_level
                 .clone()
                 .or(config.compression_level.clone())
-                .unwrap_or(0)
-                .clamp(0, 9),
-            use_versioning: replica
-                .use_versioning
+                .unwrap_or(0),
+            compression_algorithm: replica
+                .compression_algorithm
                 .clone()
-                .or(config.use_versioning.clone())
-                .unwrap_or(false),
-            path_generator: path_generation,
+                .or(config.compression_algorithm.clone())
+                .unwrap_or_default(),
         }));
         index += 1;
     }
@@ -386,23 +371,7 @@ pub fn check_config_changes(prefix: &str, config: Arc<StorageConfig>, sql: &Meta
     }
     sql.set_setting(&setting_encryption_key_hash, &encryption_key)?;
 
-    // Changing path_generator will cause in a mismatch between previous and new filenames
-    let setting_path_generator = format!("{}:path_generator", prefix);
-    let path_generator = config.path_generator.to_string();
-    {
-        let setting = sql.get_setting(&setting_path_generator)?;
-        if let Some(setting) = setting {
-            if setting != path_generator {
-                error!("use_hash_as_filename or use_id_as_filename changed, this will cause loss of data, it's recommended to revert the setting or recreate the filesystem");
-                if !ask_for_confirmation("Do you want to proceed anyways? Type 'yes' or 'y' to confirm") {
-                    return Err(anyhow!("Operation cancelled"));
-                }
-            }
-        }
-    }
-    sql.set_setting(&setting_path_generator, &path_generator)?;
-
-    // Changing s3 settings will make the data inaccesible
+    // Changing s3 settings will make the data inaccessible
     let setting_s3_bucket = format!("{}:s3_bucket", prefix);
     let setting_s3_region = format!("{}:s3_region", prefix);
     let setting_s3_endpoint_url = format!("{}:s3_endpoint_url", prefix);
@@ -483,13 +452,6 @@ fn validate_storage(cfg: &StorageConfig) -> Result<(), Error> {
         }
     }
 
-    if !cfg.encryption_key.is_empty() && cfg.path_generator == PathGenerator::Sha512 {
-        errors.push(
-            "The option use_hash_as_filename is incompatible with encryption, use use_id_as_filename instead"
-                .to_string(),
-        );
-    }
-
     if !errors.is_empty() {
         return Err(anyhow!("Config errors detected:\n - {}", errors.join("\n - ")));
     }
@@ -554,21 +516,5 @@ impl Display for StorageConfig {
         write!(f, "  encryption_key: {}\n", self.encryption_key)?;
         write!(f, "  compression_level: {}\n", self.compression_level)?;
         write!(f, "}}")
-    }
-}
-
-impl StorageConfig {
-    pub fn path_of(&self, info: &ObjInfo) -> String {
-        match self.path_generator {
-            PathGenerator::Sha512 => {
-                if info.sha512.is_empty() {
-                    "null".to_string()
-                } else {
-                    format!("{}.dat", &info.sha512[..32])
-                }
-            }
-            PathGenerator::ExternalId => info.external_id.to_string(),
-            PathGenerator::Path => info.full_path.trim_start_matches('/').to_string(),
-        }
     }
 }
